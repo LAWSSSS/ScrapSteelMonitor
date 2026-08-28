@@ -1,0 +1,12 @@
+.env
+monitor/.env
+monitor/state/
+monitor/pending/
+monitor/backups/
+monitor/db_dumps/
+monitor/logs/
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+20260823/

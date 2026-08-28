@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>检判修正看板</title>
+  <style>
+    :root {
+      --bg: #f4f2ec;
+      --ink: #1c1b16;
+      --muted: #6b675c;
+      --line: #d8d3c4;
+      --card: #fffcf5;
+      --warn: #9a3412;
+      --ok: #166534;
+      --bad: #991b1b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+      background: var(--bg); color: var(--ink);
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 28px 20px 64px; }
+    h1 { font-size: 24px; margin: 0 0 4px; font-weight: 650; }
+    h2 { font-size: 16px; margin: 28px 0 10px; }
+    .sub { color: var(--muted); margin-bottom: 18px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    [hidden] { display: none !important; }
+    input[type=date], button, select {
+      border: 1px solid var(--line); background: #fff; color: var(--ink);
+      padding: 7px 12px; border-radius: 6px; font: inherit;
+    }
+    select { min-width: 84px; }
+    button { cursor: pointer; }
+    button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+    button.ghost { background: transparent; }
+    button:disabled { opacity: 0.5; cursor: wait; }
+    .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0 8px; }
+    .mode {
+      background: var(--card); border: 2px solid var(--line); border-radius: 10px;
+      padding: 16px 18px; cursor: pointer; text-align: left; width: 100%;
+    }
+    .mode h3 { margin: 0 0 6px; font-size: 17px; }
+    .mode p { margin: 0; color: var(--muted); font-size: 13px; }
+    .mode.on { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+    .badge {
+      display: inline-block; margin-top: 8px; padding: 2px 8px;
+      border-radius: 999px; font-size: 12px; background: #efece3; color: var(--muted);
+    }
+    .badge.live { background: #dcfce7; color: var(--ok); }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0; }
+    .stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+    .stat b { display: block; font-size: 26px; font-weight: 650; }
+    .stat span { color: var(--muted); font-size: 13px; }
+    .stat.warn b { color: var(--warn); }
+    .stat.ok b { color: var(--ok); }
+    .notice { border: 1px solid var(--line); background: #fff; padding: 10px 12px; border-radius: 8px; color: var(--muted); }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-top: 10px; }
+    .big { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .big b { display: block; font-size: 22px; }
+    .big.bad b { color: var(--bad); }
+    table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }
+    th { color: var(--muted); font-weight: 550; }
+    .pills { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 12px; }
+    .pill { border: 1px solid var(--line); padding: 4px 10px; border-radius: 999px; background: #fff; cursor: pointer; }
+    .pill.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+    .meta { color: var(--muted); font-size: 13px; margin: 4px 0; }
+    code { font-size: 12px; }
+    .log { color: var(--muted); font-size: 13px; }
+    .actions { margin-top: 12px; }
+    @media (max-width: 720px) {
+      .modes, .stats, .big { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>检判修正看板</h1>
+    <p class="sub">本机 127.0.0.1 · 默认先审再写库 · 启动后先选工作方式 · 鼠标停住 30 秒后画轨迹防 VPN 掉线</p>
+
+    <div class="modes">
+      <button type="button" class="mode" id="modeWatch" onclick="chooseMode('watch-today')">
+        <h3>监控当天</h3>
+        <p>盯今天的车次。满 2 条人工就进待审，每 5 分钟再扫一次。仍要你点批准才写库。</p>
+        <span class="badge" id="watchBadge">未开启</span>
+      </button>
+      <button type="button" class="mode" id="modeReview" onclick="chooseMode('review-history')">
+        <h3>审核历史日</h3>
+        <p>选过去某一天，扫一次再审。有 3 条人工就按 3 条平均判；只有 2 条仍按 2 条。不会循环改今天。</p>
+        <span class="badge" id="reviewBadge">未选择</span>
+      </button>
+    </div>
+
+    <div class="row actions" id="modeActions">
+      <div id="chooseActions" class="row">
+        <span class="meta">点上面两张卡片之一。启动后默认不监控今天。</span>
+      </div>
+      <div id="watchActions" class="row" hidden>
+        <span class="meta" id="watchDayLock">业务日锁定今天</span>
+        <button class="primary" id="scanWatchBtn">立即再扫一次</button>
+        <button class="ghost" id="stopBtn">停止监控</button>
+      </div>
+      <div id="reviewActions" class="row" hidden>
+        <span>业务日</span>
+        <select id="year" aria-label="年"></select>
+        <select id="month" aria-label="月"></select>
+        <select id="day" aria-label="日"></select>
+        <button class="primary" id="scanReviewBtn">扫描该日</button>
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><b id="sBills">0</b><span>该日磅单</span></div>
+      <div class="stat warn"><b id="sPend">0</b><span>待你审核</span></div>
+      <div class="stat ok"><b id="sSkip">0</b><span>规则/带内跳过</span></div>
+      <div class="stat"><b id="sDone">0</b><span>已处理</span></div>
+    </div>
+    <div class="notice" id="notice">先选一种工作方式。不会自动改今天。</div>
+    <p class="meta" id="alive"></p>
+
+    <h2>待审核 · 先看这一辆</h2>
+    <div class="pills" id="pills"></div>
+    <div class="card" id="detail">还没有待审车。</div>
+
+    <h2>该日全部车次</h2>
+    <table>
+      <thead>
+        <tr><th>车牌</th><th>类型</th><th>对比</th><th>差值</th><th>处理</th></tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+
+    <h2>流水</h2>
+    <div class="log" id="logs"></div>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let state = { pending: [], vehicles: [], selected: 0, ui: { mode: "choose" } };
+    const STEEL_NAMES = {
+      1: "重废1", 2: "重废2", 3: "重废3",
+      4: "剪料1", 5: "剪料2", 6: "剪料3", 7: "剪料4",
+      8: "破碎料1", 9: "破碎料2", 10: "破碎料3",
+      11: "中废", 12: "生铁", 13: "厚剪",
+      14: "钢筋切粒", 15: "汽车壳", 16: "超标"
+    };
+
+    function steelLabel(code) {
+      if (code == null || code === "") return "";
+      const names = state.steel_names || STEEL_NAMES;
+      return names[code] || names[String(code)] || names[Number(code)] || ("料型" + code);
+    }
+
+    function displayReason(raw) {
+      const reason = raw.reason || raw.status || "";
+      const steelType = raw.main_type != null
+        ? raw.main_type
+        : (raw.human1 && raw.human1.steel_type);
+      if (steelType != null && String(reason).indexOf("主料型不是重废1/2") >= 0) {
+        return "主料型不是重废1/2（" + steelLabel(steelType) + "）";
+      }
+      return reason;
+    }
+    let busy = false;
+
+    function todayISO() {
+      return (state.ui && state.ui.today) || localToday();
+    }
+
+    function localToday() {
+      const d = new Date();
+      const z = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+      return z.toISOString().slice(0, 10);
+    }
+
+    function yesterdayISO() {
+      const d = new Date(todayISO() + "T00:00:00");
+      d.setDate(d.getDate() - 1);
+      const z = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+      return z.toISOString().slice(0, 10);
+    }
+
+    function pad2(n) {
+      return String(n).padStart(2, "0");
+    }
+
+    function currentDate() {
+      const ui = state.ui || {};
+      if (ui.mode === "watch-today") return todayISO();
+      if ($("year") && $("year").value && $("month").value && $("day").value) {
+        return `${$("year").value}-${$("month").value}-${$("day").value}`;
+      }
+      return ui.date || localStorage.getItem("bizDate") || yesterdayISO();
+    }
+
+    function dateEditing() {
+      return ["year", "month", "day"].includes(document.activeElement && document.activeElement.id);
+    }
+
+    function fillYears() {
+      const sel = $("year");
+      const ty = Number(todayISO().slice(0, 4));
+      sel.innerHTML = "";
+      for (let y = ty; y >= ty - 2; y -= 1) {
+        sel.appendChild(new Option(y + "年", String(y)));
+      }
+    }
+
+    function fillMonths() {
+      const sel = $("month");
+      sel.innerHTML = "";
+      for (let i = 1; i <= 12; i += 1) {
+        sel.appendChild(new Option(i + "月", pad2(i)));
+      }
+    }
+
+    function fillDays(year, month) {
+      const sel = $("day");
+      const prev = sel.value;
+      const last = new Date(Number(year), Number(month), 0).getDate();
+      sel.innerHTML = "";
+      for (let i = 1; i <= last; i += 1) {
+        sel.appendChild(new Option(i + "日", pad2(i)));
+      }
+      if (prev && Number(prev) <= last) sel.value = prev;
+      else sel.value = pad2(last);
+    }
+
+    function setPickedDate(iso) {
+      const parts = (iso || yesterdayISO()).split("-");
+      if (parts.length !== 3) return;
+      if (!$("year").options.length) {
+        fillYears();
+        fillMonths();
+      }
+      $("year").value = parts[0];
+      $("month").value = parts[1];
+      fillDays(parts[0], parts[1]);
+      $("day").value = parts[2];
+    }
+
+    function onDatePartChange() {
+      fillDays($("year").value, $("month").value);
+      let day = currentDate();
+      if (day > todayISO()) {
+        setPickedDate(todayISO());
+        day = todayISO();
+      }
+      localStorage.setItem("bizDate", day);
+      if (state.ui) state.ui.date = day;
+      refresh();
+    }
+
+    async function api(path, opt) {
+      const res = await fetch(path, opt);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || res.statusText);
+      return data;
+    }
+
+    function renderActions() {
+      const ui = state.ui || {};
+      const mode = ui.mode || "choose";
+      $("chooseActions").hidden = mode !== "choose";
+      $("watchActions").hidden = mode !== "watch-today";
+      $("reviewActions").hidden = mode !== "review-history";
+      if (mode === "watch-today") {
+        $("watchDayLock").textContent = "业务日锁定 " + todayISO();
+        $("scanWatchBtn").textContent = ui.scanning ? "正在扫描…" : "立即再扫一次";
+        $("scanWatchBtn").disabled = !!ui.scanning;
+      }
+      if (mode === "review-history" && !dateEditing()) {
+        setPickedDate(ui.date || currentDate());
+      }
+    }
+
+    function renderModeCards() {
+      const ui = state.ui || {};
+      $("modeWatch").className = "mode" + (ui.mode === "watch-today" ? " on" : "");
+      $("modeReview").className = "mode" + (ui.mode === "review-history" ? " on" : "");
+      const watch = $("watchBadge");
+      const review = $("reviewBadge");
+      if (ui.watching) {
+        watch.textContent = ui.scanning ? "监控中 · 正在扫" : "监控中";
+        watch.className = "badge live";
+      } else {
+        watch.textContent = "未开启";
+        watch.className = "badge";
+      }
+      if (ui.mode === "review-history") {
+        review.textContent = "审核 " + (ui.date || currentDate());
+        review.className = "badge live";
+      } else {
+        review.textContent = "未选择";
+        review.className = "badge";
+      }
+    }
+
+    function render() {
+      const s = state.summary || {};
+      $("sBills").textContent = s.manual_bills || 0;
+      $("sPend").textContent = (state.pending || []).length;
+      $("sSkip").textContent = s.skipped || 0;
+      $("sDone").textContent = s.processed || 0;
+      $("alive").textContent = state.aliveText || "";
+      $("notice").textContent = state.notice || "先选一种工作方式。不会自动改今天。";
+      renderModeCards();
+      renderActions();
+
+      const prev = (state.pending || [])[state.selected];
+      const pills = $("pills");
+      pills.innerHTML = "";
+      (state.pending || []).forEach((c, i) => {
+        const b = document.createElement("button");
+        b.className = "pill" + (i === state.selected ? " on" : "");
+        const prefix = (c.kind === "deduct") ? "扣重 " : "料型 ";
+        b.textContent = prefix + (c.plate || c.weight_bill_no);
+        b.onclick = () => { state.selected = i; render(); };
+        pills.appendChild(b);
+      });
+
+      const card = (state.pending || [])[state.selected] || prev;
+      const box = $("detail");
+      if (!card) {
+        box.textContent = state.ui && state.ui.mode === "choose"
+          ? "先选工作方式。"
+          : "这一天没有待审车。";
+      } else if (card.kind === "deduct") {
+        box.innerHTML = renderDeductCard(card);
+      } else {
+        const others = Object.entries(card.after_pcts || {})
+          .filter(([k]) => Number(k) !== card.main_type)
+          .map(([k, v]) => `${steelLabel(k)} ${v}%`)
+          .join(" / ");
+        box.innerHTML = `
+          <div class="row" style="justify-content:space-between">
+            <strong>${card.plate} · ${card.main_label}</strong>
+            <span class="meta">${card.is_mix ? "混料" : "非混料"} ${card.mix_before}% → ${card.mix_after}%${card.mix_note ? "（" + card.mix_note + "）" : ""}</span>
+          </div>
+          <div class="big">
+            <div class="bad"><b>${card.compare_pct != null ? card.compare_pct : card.ai_pct}%</b><span class="meta">${card.is_mix ? "改前 AI（混料=库内）" : "改前展示（非混料已加幅）"}</span></div>
+            <div><b>${card.ai_after}%</b><span class="meta">改后目标 ${card.target}%</span></div>
+            <div><b>${card.volume_update_rows}</b><span class="meta">将 UPDATE 体积行</span></div>
+            <div><b>${card.insert_rows}</b><span class="meta">将 INSERT</span></div>
+          </div>
+          <p class="meta">${humanPctLine(card)} · 随机差 ${card.delta}</p>
+          <p class="meta">${card.is_mix ? "混料不套区间加幅，对比用库内 " + card.ai_pct + "%" : "非混料库内 " + card.ai_pct + "%" + (card.boost_pp ? " +" + card.boost_pp + "pp → 展示 " + card.display_pct + "%" : "（本区间不加幅）展示 " + (card.display_pct != null ? card.display_pct : card.ai_pct) + "%")}</p>
+          <p class="meta">改后其它料型：${others || "—"}</p>
+          <p class="meta">磅单 ${card.weight_bill_no} · task 1 个</p>
+          <p class="meta"><code>${card.task_code}</code></p>
+          <p class="meta">时间窗 ${card.time_min} — ${card.time_max}（必须落在 ${card.biz_date}）</p>
+          <p class="meta">同车牌其它日期 ${card.other_date_rows} 行，本次 id 不含它们 · 该日行数 ${card.row_count}</p>
+          <p class="meta">抽 3 个抓斗目标料型占比：${(card.grab_samples || []).join("% / ")}%</p>
+          <div class="row" style="margin-top:12px">
+            <button class="primary" onclick="doApprove()">批准写库</button>
+            <button onclick="doReject()">拒绝</button>
+          </div>
+        `;
+      }
+
+      const pendingByBill = Object.fromEntries(
+        (state.pending || [])
+          .filter((c) => (c.kind || "volume") === "volume")
+          .map((c) => [c.weight_bill_no, c])
+      );
+      const tb = $("tbody");
+      tb.innerHTML = (state.vehicles || []).map((raw) => {
+        if (raw.kind === "deduct") {
+          const cmp = raw.ai_kg != null && raw.human_kg != null
+            ? raw.ai_kg + "kg → " + raw.human_kg + "kg"
+            : "—";
+          return `
+          <tr>
+            <td>${raw.plate || ""}</td>
+            <td>扣重</td>
+            <td>${cmp}</td>
+            <td>${raw.gap_kg != null ? raw.gap_kg + "kg" : "—"}</td>
+            <td>${raw.status === "pending" ? "扣重待审" : (raw.reason || raw.status)}</td>
+          </tr>`;
+        }
+        const card = pendingByBill[raw.weight_bill_no] || {};
+        const v = {
+          ...raw,
+          ai_pct: raw.ai_pct != null ? raw.ai_pct : card.ai_pct,
+          display_pct: raw.display_pct != null ? raw.display_pct : card.display_pct,
+          compare_pct: raw.compare_pct != null ? raw.compare_pct : card.compare_pct,
+          avg: raw.avg != null ? raw.avg : card.avg,
+          gap: raw.gap != null ? raw.gap : card.gap,
+          main_label: steelLabel((raw.human1 && raw.human1.steel_type) || raw.main_type)
+            || raw.main_label
+            || (raw.human1 && raw.human1.label)
+            || card.main_label
+            || "",
+        };
+        const shown = v.compare_pct != null ? v.compare_pct : v.ai_pct;
+        const aiCell = shown != null && v.avg != null ? shown + "% → " + v.avg + "%" : "—";
+        return `
+        <tr>
+          <td>${v.plate || ""}</td>
+          <td>${v.main_label || "料型"}</td>
+          <td>${aiCell}</td>
+          <td>${v.gap != null ? v.gap : "—"}</td>
+          <td>${v.status === "pending" ? "料型待审" : displayReason(v)}</td>
+        </tr>`;
+      }).join("");
+
+      $("logs").innerHTML = (state.logs || []).slice().reverse().slice(0, 12)
+        .map((l) => `${l.ts || ""} ${l.event} ${l.plate || l.weight_bill_no || ""} ${l.reason || ""}`)
+        .join("<br>");
+    }
+
+    function humansUsed(card) {
+      if (card.humans_used) return Number(card.humans_used);
+      return card.human3 || card.human3_t != null ? 3 : 2;
+    }
+
+    function humanPctLine(card) {
+      const parts = [];
+      if (card.human1) parts.push("人工1 " + card.human1.pct + "%");
+      if (card.human2) parts.push("人工2 " + card.human2.pct + "%");
+      if (card.human3) parts.push("人工3 " + card.human3.pct + "%");
+      const label = humansUsed(card) >= 3 ? "三人平均" : "两人平均";
+      parts.push(label + " " + card.avg + "%");
+      return parts.join(" · ");
+    }
+
+    function humanTonLine(card) {
+      const parts = [
+        "人工1 " + (card.human1_t != null ? card.human1_t : "—") + "T",
+        "人工2 " + (card.human2_t != null ? card.human2_t : "—") + "T",
+      ];
+      if (humansUsed(card) >= 3) {
+        parts.push("人工3 " + (card.human3_t != null ? card.human3_t : "—") + "T");
+      }
+      return parts.join(" · ");
+    }
+
+    function cardKey(c) {
+      return (c.kind || "volume") + "|" + c.weight_bill_no;
+    }
+
+    function renderDeductCard(card) {
+      const last = card.last_target_kg != null
+        ? `上次目标 ${card.last_target_kg}kg · 改前 ${card.ai_kg_before != null ? card.ai_kg_before : "—"}kg`
+        : "还没写过库，先填目标公斤数";
+      return `
+        <div class="row" style="justify-content:space-between">
+          <strong>${card.plate} · 扣重</strong>
+          <span class="meta">${card.in_band ? "已在150kg内" : "超过150kg，不合格"}</span>
+        </div>
+        <div class="big">
+          <div class="bad"><b>${card.ai_kg != null ? card.ai_kg : "—"}</b><span class="meta">核算扣杂 kg</span></div>
+          <div><b>${card.human_kg != null ? card.human_kg : "—"}</b><span class="meta">${humansUsed(card) >= 3 ? "三人平均扣重 kg" : "两人平均扣重 kg"}</span></div>
+          <div><b>${card.gap_kg != null ? card.gap_kg : "—"}</b><span class="meta">差值 kg（线=150）</span></div>
+          <div><b>${card.deduct_rows || 0}</b><span class="meta">有扣杂行</span></div>
+        </div>
+        <p class="meta">${humanTonLine(card)} · 净重 ${card.net_weight || "—"}kg</p>
+        <p class="meta">原始 ${card.original_kg != null ? card.original_kg : "—"}kg · base ${card.base_kg != null ? card.base_kg : "—"}kg · 预处理后 ${card.pre_kg != null ? card.pre_kg : "—"}kg</p>
+        <p class="meta">${card.preprocess_op || "—"} · ${card.interval || ""}${card.random_missing ? " · 随机数未落库，暂用205" : ""}</p>
+        <p class="meta">${last}</p>
+        <p class="meta">磅单 ${card.weight_bill_no}</p>
+        <p class="meta"><code>${card.task_code || ""}</code></p>
+        <p class="meta">时间窗 ${card.time_min || ""} — ${card.time_max || ""} · 该日行数 ${card.row_count || ""}</p>
+        <p class="meta">目标按核算扣杂填。写完会回读核算差；仍超 150 就按接近了多少再改一枪。</p>
+        <div class="row" style="margin-top:12px">
+          <label class="meta">目标 kg</label>
+          <input id="deductTarget" type="number" min="0.01" step="0.01" placeholder="例如 380" style="width:120px" />
+          <button class="primary" onclick="doApproveDeduct()">确认写库</button>
+          <button onclick="doRefreshDeduct()">再查一次</button>
+          <button onclick="doReject()">拒绝${card.written ? "并回滚" : ""}</button>
+        </div>
+      `;
+    }
+
+    async function refresh() {
+      const ui = state.ui || {};
+      const day = ui.mode === "watch-today" ? todayISO() : currentDate();
+      if (ui.mode === "review-history") localStorage.setItem("bizDate", day);
+      const data = await api("/api/overview?date=" + encodeURIComponent(day));
+      const prev = (state.pending || [])[state.selected];
+      const prevKey = prev ? cardKey(prev) : "";
+      state = { ...state, ...data };
+      const idx = (state.pending || []).findIndex((c) => cardKey(c) === prevKey);
+      state.selected = idx >= 0 ? idx : 0;
+      render();
+    }
+
+    async function chooseMode(mode) {
+      if (busy) return;
+      busy = true;
+      $("notice").textContent = mode === "watch-today" ? "正在打开当天监控并扫描今天…" : "已切到审核历史日。";
+      try {
+        const body = { mode };
+        if (mode === "review-history") {
+          const stored = localStorage.getItem("bizDate");
+          body.date = (stored && stored < todayISO()) ? stored : yesterdayISO();
+        }
+        const data = await api("/api/mode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const prev = (state.pending || [])[state.selected];
+        const prevKey = prev ? cardKey(prev) : "";
+        state = { ...state, ...(data.overview || {}), ui: data.ui || state.ui };
+        const idx = (state.pending || []).findIndex((c) => cardKey(c) === prevKey);
+        state.selected = idx >= 0 ? idx : 0;
+        if (state.ui && state.ui.date) localStorage.setItem("bizDate", state.ui.date);
+        render();
+      } catch (e) {
+        $("notice").textContent = e.message;
+        alert(e.message);
+      } finally {
+        busy = false;
+      }
+    }
+
+    async function doScan() {
+      if (busy) return;
+      const ui = state.ui || {};
+      const day = ui.mode === "watch-today" ? todayISO() : currentDate();
+      busy = true;
+      ["scanWatchBtn", "scanReviewBtn"].forEach((id) => { if ($(id)) $(id).disabled = true; });
+      $("notice").textContent = "正在扫描 " + day + "…";
+      try {
+        await api("/api/scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ date: day }),
+        });
+        await refresh();
+      } catch (e) {
+        alert(e.message);
+      } finally {
+        busy = false;
+        ["scanWatchBtn", "scanReviewBtn"].forEach((id) => { if ($(id)) $(id).disabled = false; });
+      }
+    }
+
+    async function doApprove() {
+      const card = state.pending[state.selected];
+      if (!card) return;
+      if (card.kind === "deduct") return doApproveDeduct();
+      if (!confirm("确认把 " + card.plate + " 写入数据库？")) return;
+      try {
+        await api("/api/approve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ticket: card.weight_bill_no, date: card.biz_date }),
+        });
+        await refresh();
+      } catch (e) { alert(e.message); }
+    }
+
+    async function doApproveDeduct() {
+      const card = state.pending[state.selected];
+      if (!card) return;
+      const input = $("deductTarget");
+      const target = input ? Number(input.value) : NaN;
+      if (!(target > 0)) {
+        alert("请先填写目标扣杂公斤数");
+        return;
+      }
+      if (!confirm("确认把 " + card.plate + " 的扣杂缩放到 " + target + "kg？")) return;
+      try {
+        const data = await api("/api/approve-deduct", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ticket: card.weight_bill_no,
+            date: card.biz_date,
+            target_kg: target,
+          }),
+        });
+        if (data.after) {
+          $("notice").textContent = data.in_band
+            ? (card.plate + " 扣重已进入150kg内，估算 " + data.after.ai_kg + "kg")
+            : (card.plate + " 已写库，估算 " + data.after.ai_kg + "kg，还差 " + data.after.gap_kg + "kg，可再改");
+        }
+        await refresh();
+      } catch (e) { alert(e.message); }
+    }
+
+    async function doRefreshDeduct() {
+      const card = state.pending[state.selected];
+      if (!card) return;
+      try {
+        const data = await api("/api/refresh-deduct", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ticket: card.weight_bill_no, date: card.biz_date }),
+        });
+        if (data.after) {
+          $("notice").textContent = data.in_band
+            ? (card.plate + " 回读已在150kg内")
+            : (card.plate + " 回读估算 " + data.after.ai_kg + "kg，差 " + data.after.gap_kg + "kg");
+        }
+        await refresh();
+      } catch (e) { alert(e.message); }
+    }
+
+    async function doReject() {
+      const card = state.pending[state.selected];
+      if (!card) return;
+      await api("/api/reject", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ticket: card.weight_bill_no,
+          date: card.biz_date,
+          kind: card.kind || "volume",
+        }),
+      });
+      await refresh();
+    }
+
+    $("scanWatchBtn").onclick = doScan;
+    $("stopBtn").onclick = () => chooseMode("choose");
+    $("scanReviewBtn").onclick = doScan;
+    $("year").onchange = onDatePartChange;
+    $("month").onchange = onDatePartChange;
+    $("day").onchange = onDatePartChange;
+    fillYears();
+    fillMonths();
+    setPickedDate(localStorage.getItem("bizDate") || yesterdayISO());
+
+    refresh().catch((e) => { $("notice").textContent = e.message; render(); });
+    setInterval(() => {
+      if (!busy && !dateEditing()) refresh().catch(() => {});
+    }, 15000);
+  </script>
+</body>
+</html>
