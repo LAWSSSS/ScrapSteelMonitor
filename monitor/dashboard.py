@@ -32,7 +32,10 @@ from monitor.db import format_db_error
 from monitor.restore import restore, restore_deduct
 from monitor.scan import merge_pending_ai, scan_day
 from monitor.store import (
+    MODE_WATCH,
+    MODE_WATCH_AUTO,
     is_processed,
+    is_watch_mode,
     list_pending,
     load_processed,
     load_scan_summary,
@@ -54,7 +57,10 @@ def _alive_text() -> str:
     ts = hb.get("ts")
     watch = CONTROLLER.snapshot()
     watching = bool(watch.get("watching"))
-    mode = "watch-today" if watching else (hb.get("mode") or "dashboard")
+    if watching:
+        mode = "watch-today-auto" if watch.get("auto") else "watch-today"
+    else:
+        mode = hb.get("mode") or "dashboard"
     if not ts:
         base = "还没有心跳"
     else:
@@ -89,8 +95,8 @@ def _ui_payload() -> dict:
     today = today_cn().isoformat()
     mode = saved.get("mode") or "choose"
     if watch.get("watching"):
-        mode = "watch-today"
-    day = today if mode == "watch-today" else (saved.get("date") or "")
+        mode = MODE_WATCH_AUTO if watch.get("auto") else MODE_WATCH
+    day = today if is_watch_mode(mode) else (saved.get("date") or "")
     return {
         "mode": mode,
         "date": day,
@@ -104,16 +110,24 @@ def _notice(day: str, summary: dict, pending_n: int) -> str:
     if ui.get("watching") and ui.get("last_error"):
         return f"扫描出错：{ui['last_error']}。监控仍开着，5 分钟后会再试。"
     if ui["mode"] == "choose":
-        return "先选一种工作方式：监控当天，或选一个历史日期审核。"
-    if ui["mode"] == "watch-today":
-        if ui.get("scanning"):
-            return f"正在扫今天 {ui['today']}，仍需你点批准才写库。"
+        return "先选一种工作方式：监控当天（先审）、监控当天-自动，或审核历史日。"
+    if is_watch_mode(ui["mode"]):
         extra = ""
         if ui.get("next_scan_at"):
             extra = f"下次自动扫 {ui['next_scan_at']}。"
+        if ui.get("auto"):
+            applied = int(ui.get("last_auto_applied") or 0)
+            if ui.get("scanning"):
+                return f"正在扫今天 {ui['today']}，扫到待审会自动写库。"
+            return (
+                f"自动模式：正在监控今天 {ui['today']}，每 {int(ui['interval_sec']) // 60} 分钟扫一次。"
+                f"{extra} 上次自动写库 {applied} 辆。点「监控当天」可改回先审。"
+            )
+        if ui.get("scanning"):
+            return f"正在扫今天 {ui['today']}，仍需你点批准才写库。"
         return (
             f"正在监控今天 {ui['today']}，每 {int(ui['interval_sec']) // 60} 分钟扫一次。"
-            f"{extra} 待审 {pending_n}。不会自动写库。"
+            f"{extra} 待审 {pending_n}。点「监控当天-自动」可改为扫完就写库。"
         )
     if summary:
         return f"{day} 已扫完，待审 {pending_n}。不会循环监控今天。"
@@ -122,10 +136,10 @@ def _notice(day: str, summary: dict, pending_n: int) -> str:
 
 def overview(day: str) -> dict:
     ui = _ui_payload()
-    if ui["mode"] == "watch-today":
+    if is_watch_mode(ui["mode"]):
         day = ui["today"]
     summary = load_scan_summary(day)
-    pending = list_pending(day, kind=KIND_VOLUME if ui["mode"] == "watch-today" else None)
+    pending = list_pending(day, kind=KIND_VOLUME if is_watch_mode(ui["mode"]) else None)
     processed = load_processed()
     done = sum(
         1
@@ -140,7 +154,7 @@ def overview(day: str) -> dict:
     vehicles = []
     for raw in summary.get("vehicles") or []:
         kind = raw.get("kind") or KIND_VOLUME
-        if ui["mode"] == "watch-today" and kind == KIND_DEDUCT:
+        if is_watch_mode(ui["mode"]) and kind == KIND_DEDUCT:
             continue
         card = pending_volume.get(str(raw.get("weight_bill_no") or "")) if kind == KIND_VOLUME else None
         v = merge_pending_ai(raw, card) if kind == KIND_VOLUME else dict(raw)
@@ -180,9 +194,13 @@ def _history_default_day() -> date:
 
 def set_mode(mode: str, day_text: str = "") -> dict:
     today = today_cn()
-    if mode == "watch-today":
-        save_ui_mode("watch-today", today.isoformat())
+    if is_watch_mode(mode):
+        auto = mode == MODE_WATCH_AUTO
+        save_ui_mode(mode, today.isoformat())
+        CONTROLLER.set_auto(auto)
         CONTROLLER.start()
+        if auto:
+            CONTROLLER.flush_auto()
         return {"ok": True, "ui": _ui_payload(), "overview": overview(today.isoformat())}
     if mode == "review-history":
         CONTROLLER.stop()
@@ -258,7 +276,10 @@ class Handler(BaseHTTPRequestHandler):
                     if snap.get("error"):
                         raise RuntimeError(snap["error"])
                     day_s = today_cn().isoformat()
-                    write_heartbeat({"last_scan_date": day_s, "mode": "watch-today"})
+                    write_heartbeat({
+                        "last_scan_date": day_s,
+                        "mode": "watch-today-auto" if CONTROLLER.is_auto() else "watch-today",
+                    })
                     self._json(200, {"ok": True, "ui": _ui_payload(), "overview": overview(day_s)})
                     return
                 day = parse_day(str(body.get("date")))
@@ -321,7 +342,7 @@ def main() -> None:
         start_in_background()
     # 进程重启后不自动开当天监控，必须在面板里再点一次
     saved = load_ui_mode()
-    if saved.get("mode") == "watch-today":
+    if is_watch_mode(str(saved.get("mode") or "")):
         save_ui_mode("choose", saved.get("date") or "")
     httpd = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}/"

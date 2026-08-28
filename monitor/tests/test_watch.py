@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 
 from pymysql.err import OperationalError
 
-from monitor.store import load_ui_mode, save_ui_mode
+from monitor.store import is_watch_mode, load_ui_mode, save_ui_mode
 from monitor.watch import WatchController
 
 
@@ -24,6 +24,14 @@ class UiModeTests(unittest.TestCase):
         self.assertEqual(data["date"], "2026-08-23")
         save_ui_mode("choose", "")
         self.assertEqual(load_ui_mode()["mode"], "choose")
+
+    def test_watch_auto_mode_roundtrip(self) -> None:
+        save_ui_mode("watch-today-auto", "2026-08-28")
+        data = load_ui_mode()
+        self.assertEqual(data["mode"], "watch-today-auto")
+        self.assertTrue(is_watch_mode(data["mode"]))
+        self.assertFalse(is_watch_mode("review-history"))
+        save_ui_mode("choose", "")
 
 
 class WatchControllerTests(unittest.TestCase):
@@ -113,6 +121,69 @@ class WatchControllerTests(unittest.TestCase):
         err = ctl._run_once()
         self.assertIn("not a db blip", err)
         self.assertEqual(calls["n"], 1)
+
+    def test_set_auto_without_restart(self) -> None:
+        ctl = WatchController(
+            scan_fn=lambda day, **kwargs: {"pending": 0},
+            today_fn=lambda: date(2026, 8, 28),
+            interval_sec=60,
+        )
+        ctl.set_auto(False)
+        self.assertFalse(ctl.snapshot()["auto"])
+        ctl.set_auto(True)
+        self.assertTrue(ctl.snapshot()["auto"])
+        ctl.set_auto(False)
+        self.assertFalse(ctl.snapshot()["auto"])
+
+    def test_auto_scan_approves_pending(self) -> None:
+        applied: list[tuple[str, str]] = []
+
+        def fake_scan(day: date, **kwargs: object) -> dict:
+            return {"pending": 1, "skipped": 0}
+
+        def fake_apply(ticket: str, day: str) -> dict:
+            applied.append((ticket, day))
+            return {"ok": True, "insert_ids": [1]}
+
+        def fake_pending(day: str, kind: str = "volume") -> list[dict]:
+            return [{"weight_bill_no": "JC1", "biz_date": "2026-08-28", "plate": "桂A", "kind": "volume"}]
+
+        ctl = WatchController(
+            scan_fn=fake_scan,
+            today_fn=lambda: date(2026, 8, 28),
+            apply_fn=fake_apply,
+            pending_fn=fake_pending,
+            interval_sec=60,
+        )
+        ctl._retry_sleep_sec = 0
+        ctl.set_auto(True)
+        err = ctl._run_once()
+        self.assertEqual(err, "")
+        self.assertEqual(applied, [("JC1", "2026-08-28")])
+        self.assertEqual(ctl.snapshot()["last_auto_applied"], 1)
+        self.assertEqual(ctl.snapshot()["last_pending"], 0)
+
+    def test_manual_scan_does_not_approve(self) -> None:
+        applied: list[tuple[str, str]] = []
+
+        def fake_apply(ticket: str, day: str) -> dict:
+            applied.append((ticket, day))
+            return {"ok": True}
+
+        ctl = WatchController(
+            scan_fn=lambda day, **kwargs: {"pending": 1, "skipped": 0},
+            today_fn=lambda: date(2026, 8, 28),
+            apply_fn=fake_apply,
+            pending_fn=lambda day, kind="volume": [
+                {"weight_bill_no": "JC1", "biz_date": "2026-08-28", "kind": "volume"}
+            ],
+            interval_sec=60,
+        )
+        ctl._retry_sleep_sec = 0
+        ctl.set_auto(False)
+        ctl._run_once()
+        self.assertEqual(applied, [])
+        self.assertEqual(ctl.snapshot()["last_pending"], 1)
 
 
 if __name__ == "__main__":

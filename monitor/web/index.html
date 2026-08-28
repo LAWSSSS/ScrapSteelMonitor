@@ -35,7 +35,9 @@
     button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
     button.ghost { background: transparent; }
     button:disabled { opacity: 0.5; cursor: wait; }
-    .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0 8px; }
+      .modes { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin: 16px 0 8px; }
+      .mode.auto.on { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn); }
+      .badge.warn { background: #ffedd5; color: var(--warn); }
     .mode {
       background: var(--card); border: 2px solid var(--line); border-radius: 10px;
       padding: 16px 18px; cursor: pointer; text-align: left; width: 100%;
@@ -69,21 +71,27 @@
     code { font-size: 12px; }
     .log { color: var(--muted); font-size: 13px; }
     .actions { margin-top: 12px; }
-    @media (max-width: 720px) {
-      .modes, .stats, .big { grid-template-columns: 1fr 1fr; }
+    @media (max-width: 900px) {
+      .modes { grid-template-columns: 1fr; }
+      .stats, .big { grid-template-columns: 1fr 1fr; }
     }
   </style>
 </head>
 <body>
   <main>
     <h1>检判修正看板</h1>
-    <p class="sub">本机 127.0.0.1 · 默认先审再写库 · 启动后先选工作方式 · 鼠标停住 30 秒后画轨迹防 VPN 掉线</p>
+    <p class="sub">本机 127.0.0.1 · 启动后先选工作方式 · 监控当天和自动模式可随时切换 · 鼠标停住 30 秒后画轨迹防 VPN 掉线</p>
 
     <div class="modes">
       <button type="button" class="mode" id="modeWatch" onclick="chooseMode('watch-today')">
         <h3>监控当天</h3>
         <p>盯今天的车次。满 2 条人工就进待审，每 5 分钟再扫一次。仍要你点批准才写库。</p>
         <span class="badge" id="watchBadge">未开启</span>
+      </button>
+      <button type="button" class="mode" id="modeWatchAuto" onclick="chooseMode('watch-today-auto')">
+        <h3>监控当天-自动</h3>
+        <p>同一套扫描。扫到待审料型就自动写库，不用点批准。随时可切回「监控当天」先审。</p>
+        <span class="badge" id="watchAutoBadge">未开启</span>
       </button>
       <button type="button" class="mode" id="modeReview" onclick="chooseMode('review-history')">
         <h3>审核历史日</h3>
@@ -94,7 +102,7 @@
 
     <div class="row actions" id="modeActions">
       <div id="chooseActions" class="row">
-        <span class="meta">点上面两张卡片之一。启动后默认不监控今天。</span>
+        <span class="meta">点上面一张卡片。启动后默认不监控今天。</span>
       </div>
       <div id="watchActions" class="row" hidden>
         <span class="meta" id="watchDayLock">业务日锁定今天</span>
@@ -183,9 +191,13 @@
       return String(n).padStart(2, "0");
     }
 
+    function isWatchMode(mode) {
+      return mode === "watch-today" || mode === "watch-today-auto";
+    }
+
     function currentDate() {
       const ui = state.ui || {};
-      if (ui.mode === "watch-today") return todayISO();
+      if (isWatchMode(ui.mode)) return todayISO();
       if ($("year") && $("year").value && $("month").value && $("day").value) {
         return `${$("year").value}-${$("month").value}-${$("day").value}`;
       }
@@ -261,10 +273,12 @@
       const ui = state.ui || {};
       const mode = ui.mode || "choose";
       $("chooseActions").hidden = mode !== "choose";
-      $("watchActions").hidden = mode !== "watch-today";
+      $("watchActions").hidden = !isWatchMode(mode);
       $("reviewActions").hidden = mode !== "review-history";
-      if (mode === "watch-today") {
-        $("watchDayLock").textContent = "业务日锁定 " + todayISO();
+      if (isWatchMode(mode)) {
+        $("watchDayLock").textContent = ui.auto
+          ? "业务日锁定 " + todayISO() + " · 自动写库"
+          : "业务日锁定 " + todayISO();
         $("scanWatchBtn").textContent = ui.scanning ? "正在扫描…" : "立即再扫一次";
         $("scanWatchBtn").disabled = !!ui.scanning;
       }
@@ -276,15 +290,24 @@
     function renderModeCards() {
       const ui = state.ui || {};
       $("modeWatch").className = "mode" + (ui.mode === "watch-today" ? " on" : "");
+      $("modeWatchAuto").className = "mode" + (ui.mode === "watch-today-auto" ? " on auto" : "");
       $("modeReview").className = "mode" + (ui.mode === "review-history" ? " on" : "");
       const watch = $("watchBadge");
+      const watchAuto = $("watchAutoBadge");
       const review = $("reviewBadge");
-      if (ui.watching) {
+      if (ui.watching && !ui.auto) {
         watch.textContent = ui.scanning ? "监控中 · 正在扫" : "监控中";
         watch.className = "badge live";
       } else {
         watch.textContent = "未开启";
         watch.className = "badge";
+      }
+      if (ui.watching && ui.auto) {
+        watchAuto.textContent = ui.scanning ? "自动写库 · 正在扫" : "自动写库中";
+        watchAuto.className = "badge warn";
+      } else {
+        watchAuto.textContent = "未开启";
+        watchAuto.className = "badge";
       }
       if (ui.mode === "review-history") {
         review.textContent = "审核 " + (ui.date || currentDate());
@@ -350,6 +373,7 @@
           <p class="meta">时间窗 ${card.time_min} — ${card.time_max}（必须落在 ${card.biz_date}）</p>
           <p class="meta">同车牌其它日期 ${card.other_date_rows} 行，本次 id 不含它们 · 该日行数 ${card.row_count}</p>
           <p class="meta">抽 3 个抓斗目标料型占比：${(card.grab_samples || []).join("% / ")}%</p>
+          <p class="meta">${state.ui && state.ui.auto ? "当前是自动模式：扫到待审会自动写库。可点「监控当天」改回先审。" : ""}</p>
           <div class="row" style="margin-top:12px">
             <button class="primary" onclick="doApprove()">批准写库</button>
             <button onclick="doReject()">拒绝</button>
@@ -473,7 +497,7 @@
 
     async function refresh() {
       const ui = state.ui || {};
-      const day = ui.mode === "watch-today" ? todayISO() : currentDate();
+      const day = isWatchMode(ui.mode) ? todayISO() : currentDate();
       if (ui.mode === "review-history") localStorage.setItem("bizDate", day);
       const data = await api("/api/overview?date=" + encodeURIComponent(day));
       const prev = (state.pending || [])[state.selected];
@@ -487,7 +511,9 @@
     async function chooseMode(mode) {
       if (busy) return;
       busy = true;
-      $("notice").textContent = mode === "watch-today" ? "正在打开当天监控并扫描今天…" : "已切到审核历史日。";
+      $("notice").textContent = mode === "watch-today-auto"
+        ? "正在打开自动模式：扫到待审会写库…"
+        : (mode === "watch-today" ? "正在打开当天监控并扫描今天…" : "已切到审核历史日。");
       try {
         const body = { mode };
         if (mode === "review-history") {
@@ -517,7 +543,7 @@
     async function doScan() {
       if (busy) return;
       const ui = state.ui || {};
-      const day = ui.mode === "watch-today" ? todayISO() : currentDate();
+      const day = isWatchMode(ui.mode) ? todayISO() : currentDate();
       busy = true;
       ["scanWatchBtn", "scanReviewBtn"].forEach((id) => { if ($(id)) $(id).disabled = true; });
       $("notice").textContent = "正在扫描 " + day + "…";

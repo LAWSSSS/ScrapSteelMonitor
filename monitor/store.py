@@ -127,7 +127,15 @@ def list_pending(
     return cards
 
 
-VALID_UI_MODES = ("choose", "watch-today", "review-history")
+MODE_CHOOSE = "choose"
+MODE_WATCH = "watch-today"
+MODE_WATCH_AUTO = "watch-today-auto"
+MODE_REVIEW = "review-history"
+VALID_UI_MODES = (MODE_CHOOSE, MODE_WATCH, MODE_WATCH_AUTO, MODE_REVIEW)
+
+
+def is_watch_mode(mode: str | None) -> bool:
+    return mode in {MODE_WATCH, MODE_WATCH_AUTO}
 
 
 def ui_mode_path() -> Path:

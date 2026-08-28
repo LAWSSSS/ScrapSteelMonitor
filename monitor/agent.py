@@ -91,7 +91,7 @@ def main() -> None:
     if not args.date:
         parser.error(
             "请指定 --date YYYY-MM-DD，或使用 --watch-today。"
-            "更直观：打开看板 http://127.0.0.1:8765 选「监控当天」或「审核历史日」。"
+            "更直观：打开看板 http://127.0.0.1:8765 选工作方式。"
         )
     day = parse_day(args.date)
     summary = _run_scan(day, auto=args.auto, include_deduct=True, max_manuals=3)
