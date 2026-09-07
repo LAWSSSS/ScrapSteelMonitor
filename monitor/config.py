@@ -45,6 +45,9 @@ HEARTBEAT_STALE_SEC = 600
 DUMP_TABLES = ("intelli_task_check", "intelli_task_info")
 MOUSE_IDLE_SEC = 30.0
 MOUSE_RADIUS_PX = 180.0
+MOUSE_SHIFT_MIN_PX = 100
+MOUSE_SHIFT_MAX_PX = 1000
+MOUSE_CLICK_PROB_DEFAULT = 0.4
 
 
 def _load_dotenv() -> None:
@@ -62,6 +65,52 @@ def _load_dotenv() -> None:
 
 
 _load_dotenv()
+
+
+def env_file() -> Path:
+    """Machine-local settings. Prefer monitor/.env so Windows/Mac 起点可以不同。"""
+    monitor_env = ROOT / ".env"
+    if monitor_env.is_file():
+        return monitor_env
+    root_env = REPO_ROOT / ".env"
+    return root_env if root_env.is_file() else monitor_env
+
+
+def upsert_env(key: str, value: str, path: Path | None = None) -> Path:
+    """Create or replace one KEY=value in monitor/.env. Does not print secrets."""
+    path = path or env_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    prefix = f"{key}="
+    replaced = False
+    out: list[str] = []
+    for raw in lines:
+        stripped = raw.strip()
+        if stripped.startswith(prefix) or stripped.startswith(f"{key} ="):
+            out.append(f"{key}={value}")
+            replaced = True
+        else:
+            out.append(raw)
+    if not replaced:
+        if out and out[-1].strip():
+            out.append("")
+        out.append(f"{key}={value}")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    os.environ[key] = value
+    return path
+
+
+def mouse_origin() -> tuple[float, float] | None:
+    raw_x = os.environ.get("MOUSE_ORIGIN_X", "").strip()
+    raw_y = os.environ.get("MOUSE_ORIGIN_Y", "").strip()
+    if not raw_x or not raw_y:
+        return None
+    return float(raw_x), float(raw_y)
+
+
+def mouse_click_prob() -> float:
+    raw = os.environ.get("MOUSE_CLICK_PROB", str(MOUSE_CLICK_PROB_DEFAULT)).strip()
+    return min(1.0, max(0.0, float(raw)))
 
 
 def mysql_settings() -> dict[str, object]:

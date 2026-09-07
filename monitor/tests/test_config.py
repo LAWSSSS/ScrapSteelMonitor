@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,7 +10,14 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from monitor.config import STEEL_NAMES, relabel_vehicle_steels, steel_label
+from monitor.config import (
+    STEEL_NAMES,
+    mouse_click_prob,
+    mouse_origin,
+    relabel_vehicle_steels,
+    steel_label,
+    upsert_env,
+)
 
 
 class SteelNameTests(unittest.TestCase):
@@ -44,6 +53,36 @@ class SteelNameTests(unittest.TestCase):
 
     def test_map_covers_1_to_16(self) -> None:
         self.assertEqual(set(STEEL_NAMES), set(range(1, 17)))
+
+    def test_upsert_env_replaces_only_that_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text("MYSQL_PASSWORD=secret\nMOUSE_ORIGIN_X=1\n", encoding="utf-8")
+            upsert_env("MOUSE_ORIGIN_X", "400", path)
+            upsert_env("MOUSE_ORIGIN_Y", "1200", path)
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("MYSQL_PASSWORD=secret", text)
+            self.assertIn("MOUSE_ORIGIN_X=400", text)
+            self.assertIn("MOUSE_ORIGIN_Y=1200", text)
+            self.assertNotIn("MOUSE_ORIGIN_X=1\n", text)
+
+    def test_mouse_origin_and_click_prob_from_env(self) -> None:
+        old = {k: os.environ.get(k) for k in ("MOUSE_ORIGIN_X", "MOUSE_ORIGIN_Y", "MOUSE_CLICK_PROB")}
+        try:
+            os.environ.pop("MOUSE_ORIGIN_X", None)
+            os.environ.pop("MOUSE_ORIGIN_Y", None)
+            self.assertIsNone(mouse_origin())
+            os.environ["MOUSE_ORIGIN_X"] = "200"
+            os.environ["MOUSE_ORIGIN_Y"] = "1300"
+            os.environ["MOUSE_CLICK_PROB"] = "0.8"
+            self.assertEqual(mouse_origin(), (200.0, 1300.0))
+            self.assertEqual(mouse_click_prob(), 0.8)
+        finally:
+            for key, value in old.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 if __name__ == "__main__":

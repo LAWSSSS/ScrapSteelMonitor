@@ -81,7 +81,8 @@ def _alive_text() -> str:
         watch_txt += f" · 下次 {watch['next_scan_at']}"
     mouse = read_mouse_status()
     if mouse.get("running"):
-        vpn = f"VPN鼠标保活开（上次 {mouse.get('last_shape') or '等待停住'}）"
+        last = mouse.get("last_action") or mouse.get("last_shape") or mouse.get("note") or "等待停住"
+        vpn = f"VPN鼠标保活开（上次 {last}）"
     elif mouse.get("error"):
         vpn = f"VPN鼠标保活失败：{mouse.get('error')}"
     else:
