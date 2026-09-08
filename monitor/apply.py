@@ -89,6 +89,8 @@ def approve(weight_bill_no: str, day: str) -> dict[str, Any]:
     card = load_pending(weight_bill_no, day)
     if card is None:
         raise FileNotFoundError(f"没有待审单 {weight_bill_no} {day}")
+    if card.get("in_band"):
+        raise ValueError("该料型展示占比已在±10%带内，不能批准")
     biz = parse_day(day)
     rows = load_check_rows(
         str(card["task_code"]),

@@ -34,7 +34,7 @@
     button { cursor: pointer; }
     button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
     button.ghost { background: transparent; }
-    button:disabled { opacity: 0.5; cursor: wait; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
       .modes { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin: 16px 0 8px; }
       .mode.auto.on { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn); }
       .badge.warn { background: #ffedd5; color: var(--warn); }
@@ -85,17 +85,17 @@
     <div class="modes">
       <button type="button" class="mode" id="modeWatch" onclick="chooseMode('watch-today')">
         <h3>监控当天</h3>
-        <p>盯今天的车次。满 2 条人工就进待审，每 5 分钟再扫一次。仍要你点批准才写库。</p>
+        <p>盯今天的车次。1～3 条人工就能进待审（主料型须为重废1/2）。不一致时先选料型再批准。每 5 分钟再扫一次。</p>
         <span class="badge" id="watchBadge">未开启</span>
       </button>
       <button type="button" class="mode" id="modeWatchAuto" onclick="chooseMode('watch-today-auto')">
         <h3>监控当天-自动</h3>
-        <p>同一套扫描。扫到待审料型就自动写库，不用点批准。随时可切回「监控当天」先审。</p>
+        <p>同一套扫描。只有 2/3 人主料型一致且为重废1/2 才自动写库。1 人或需选料型的只显示，不自动写。</p>
         <span class="badge" id="watchAutoBadge">未开启</span>
       </button>
       <button type="button" class="mode" id="modeReview" onclick="chooseMode('review-history')">
         <h3>审核历史日</h3>
-        <p>选过去某一天，扫一次再审。有 3 条人工就按 3 条平均判；只有 2 条仍按 2 条。不会循环改今天。</p>
+        <p>选过去某一天，扫一次再审。1～3 条人工都能进待审；不一致时先选重废1或2。不会循环改今天。</p>
         <span class="badge" id="reviewBadge">未选择</span>
       </button>
     </div>
@@ -354,18 +354,27 @@
           .filter(([k]) => Number(k) !== card.main_type)
           .map(([k, v]) => `${steelLabel(k)} ${v}%`)
           .join(" / ");
+        const autoBlock = !!(state.ui && state.ui.auto && card.auto_ok === false);
+        const inBand = !!card.in_band;
+        const canApprove = !autoBlock && !inBand && card.target != null;
+        const autoNote = autoBlock
+          ? "自动模式不写这张卡（1条人工或需选主料型）。请切回「监控当天」再批准。"
+          : (state.ui && state.ui.auto ? "当前是自动模式：2/3人一致的卡会自动写库。可点「监控当天」改回先审。" : "");
+        const approveLabel = inBand ? "已在带内" : "批准写库";
         box.innerHTML = `
           <div class="row" style="justify-content:space-between">
             <strong>${card.plate} · ${card.main_label}</strong>
-            <span class="meta">${card.is_mix ? "混料" : "非混料"} ${card.mix_before}% → ${card.mix_after}%${card.mix_note ? "（" + card.mix_note + "）" : ""}</span>
+            <span class="meta">${manualsLabel(card)}${manualsLabel(card) ? " · " : ""}${card.is_mix ? "混料" : "非混料"} ${card.mix_before}% → ${card.mix_after}%${card.mix_note ? "（" + card.mix_note + "）" : ""}</span>
           </div>
+          ${typeOptionButtons(card)}
           <div class="big">
             <div class="bad"><b>${card.compare_pct != null ? card.compare_pct : card.ai_pct}%</b><span class="meta">${card.is_mix ? "改前 AI（混料=库内）" : "改前展示（非混料已加幅）"}</span></div>
-            <div><b>${card.ai_after}%</b><span class="meta">改后目标 ${card.target}%</span></div>
-            <div><b>${card.volume_update_rows}</b><span class="meta">将 UPDATE 体积行</span></div>
-            <div><b>${card.insert_rows}</b><span class="meta">将 INSERT</span></div>
+            <div><b>${card.ai_after != null ? card.ai_after + "%" : "—"}</b><span class="meta">改后目标 ${card.target != null ? card.target + "%" : "—"}</span></div>
+            <div><b>${card.volume_update_rows || 0}</b><span class="meta">将 UPDATE 体积行</span></div>
+            <div><b>${card.insert_rows || 0}</b><span class="meta">将 INSERT</span></div>
           </div>
-          <p class="meta">${humanPctLine(card)} · 随机差 ${card.delta}</p>
+          <p class="meta">${humanPctLine(card)} · 随机差 ${card.delta != null ? card.delta : "—"}</p>
+          ${otherMainHint(card) ? `<p class="meta">${otherMainHint(card)}</p>` : ""}
           <p class="meta">${card.is_mix ? "混料不套区间加幅，对比用库内 " + card.ai_pct + "%" : "非混料库内 " + card.ai_pct + "%" + (card.boost_pp ? " +" + card.boost_pp + "pp → 展示 " + card.display_pct + "%" : "（本区间不加幅）展示 " + (card.display_pct != null ? card.display_pct : card.ai_pct) + "%")}</p>
           <p class="meta">改后其它料型：${others || "—"}</p>
           <p class="meta">磅单 ${card.weight_bill_no} · task 1 个</p>
@@ -373,9 +382,9 @@
           <p class="meta">时间窗 ${card.time_min} — ${card.time_max}（必须落在 ${card.biz_date}）</p>
           <p class="meta">同车牌其它日期 ${card.other_date_rows} 行，本次 id 不含它们 · 该日行数 ${card.row_count}</p>
           <p class="meta">抽 3 个抓斗目标料型占比：${(card.grab_samples || []).join("% / ")}%</p>
-          <p class="meta">${state.ui && state.ui.auto ? "当前是自动模式：扫到待审会自动写库。可点「监控当天」改回先审。" : ""}</p>
+          <p class="meta">${autoNote}</p>
           <div class="row" style="margin-top:12px">
-            <button class="primary" onclick="doApprove()">批准写库</button>
+            <button class="primary" ${canApprove ? "" : "disabled"} onclick="doApprove()">${approveLabel}</button>
             <button onclick="doReject()">拒绝</button>
           </div>
         `;
@@ -423,7 +432,7 @@
           <td>${v.main_label || "料型"}</td>
           <td>${aiCell}</td>
           <td>${v.gap != null ? v.gap : "—"}</td>
-          <td>${v.status === "pending" ? "料型待审" : displayReason(v)}</td>
+          <td>${v.status === "pending" ? ("料型待审" + ((manualsLabel(v) || manualsLabel(card)) ? " · " + (manualsLabel(v) || manualsLabel(card)) : "")) : displayReason(v)}</td>
         </tr>`;
       }).join("");
 
@@ -434,17 +443,68 @@
 
     function humansUsed(card) {
       if (card.humans_used) return Number(card.humans_used);
-      return card.human3 || card.human3_t != null ? 3 : 2;
+      if (card.human3 || card.human3_t != null) return 3;
+      if (card.human2 || card.human2_t != null) return 2;
+      if (card.human1 || card.human1_t != null) return 1;
+      return 0;
+    }
+
+    function manualsLabel(card) {
+      const n = card.manual_count != null ? Number(card.manual_count) : humansUsed(card);
+      return n ? ("已有 " + n + " 条人工") : "";
+    }
+
+    function avgLabel(card) {
+      const typeName = card.main_label || steelLabel(card.main_type);
+      const typed = typeName ? "该料型（" + typeName + "）" : "该料型";
+      if (card.needs_choice) return typed + "人工平均";
+      const n = humansUsed(card);
+      if (n <= 1) return typed + "人工";
+      if (n >= 3) return typed + "三人平均";
+      return typed + "两人平均";
+    }
+
+    function humanPiece(human, idx) {
+      const name = human.name || "";
+      const label = human.label || steelLabel(human.steel_type);
+      return ("人工" + idx + " " + name + " " + label + " " + human.pct + "%").replace(/\s+/g, " ").trim();
     }
 
     function humanPctLine(card) {
       const parts = [];
-      if (card.human1) parts.push("人工1 " + card.human1.pct + "%");
-      if (card.human2) parts.push("人工2 " + card.human2.pct + "%");
-      if (card.human3) parts.push("人工3 " + card.human3.pct + "%");
-      const label = humansUsed(card) >= 3 ? "三人平均" : "两人平均";
-      parts.push(label + " " + card.avg + "%");
+      if (card.human1) parts.push(humanPiece(card.human1, 1));
+      if (card.human2) parts.push(humanPiece(card.human2, 2));
+      if (card.human3) parts.push(humanPiece(card.human3, 3));
+      parts.push(avgLabel(card) + " " + card.avg + "%");
       return parts.join(" · ");
+    }
+
+    function otherMainHint(card) {
+      const allowed = new Set((card.choosable && card.choosable.length ? card.choosable : [1, 2]).map(Number));
+      const humans = [card.human1, card.human2, card.human3].filter(Boolean);
+      const blocked = {};
+      humans.forEach((h) => {
+        const t = Number(h.steel_type);
+        if (!allowed.has(t)) {
+          const lab = h.label || steelLabel(t) || ("料型" + t);
+          blocked[lab] = (blocked[lab] || 0) + 1;
+        }
+      });
+      const bits = Object.keys(blocked).map((lab) => blocked[lab] + " 人主料型是" + lab);
+      if (!bits.length) return "";
+      const keep = card.main_label || steelLabel(card.main_type);
+      return "另外 " + bits.join("、") + "，不能选，只按" + keep + " 对齐";
+    }
+
+    function typeOptionButtons(card) {
+      const options = card.type_options || [];
+      if (!card.needs_choice && options.length <= 1) return "";
+      return `<div class="row" style="margin-top:8px">${options.map((opt) => {
+        const on = Number(opt.main_type) === Number(card.main_type);
+        const tag = opt.in_band ? " · 已在带内" : "";
+        const title = opt.reason ? ` title="${String(opt.reason).replace(/"/g, "&quot;")}"` : "";
+        return `<button type="button" class="pill${on ? " on" : ""}"${title} onclick="doChooseType(${Number(opt.main_type)})">${opt.main_label || steelLabel(opt.main_type)}${tag}</button>`;
+      }).join("")}</div>`;
     }
 
     function humanTonLine(card) {
@@ -478,7 +538,7 @@
           <div><b>${card.deduct_rows || 0}</b><span class="meta">有扣杂行</span></div>
         </div>
         <p class="meta">${humanTonLine(card)} · 净重 ${card.net_weight || "—"}kg</p>
-        <p class="meta">原始 ${card.original_kg != null ? card.original_kg : "—"}kg · base ${card.base_kg != null ? card.base_kg : "—"}kg · 预处理后 ${card.pre_kg != null ? card.pre_kg : "—"}kg</p>
+        <p class="meta">原始 ${card.original_kg != null ? card.original_kg : "—"}kg · base ${card.base_kg != null ? card.base_kg : "—"}kg · 预处理后 ${card.pre_kg != null ? card.pre_kg : "—"}kg${card.deduct_weight_rate != null ? " · 落库率 " + card.deduct_weight_rate + "（仅参考）" : ""}</p>
         <p class="meta">${card.preprocess_op || "—"} · ${card.interval || ""}${card.random_missing ? " · 随机数未落库，暂用205" : ""}</p>
         <p class="meta">${last}</p>
         <p class="meta">磅单 ${card.weight_bill_no}</p>
@@ -562,10 +622,36 @@
       }
     }
 
+    async function doChooseType(mainType) {
+      const card = state.pending[state.selected];
+      if (!card || card.kind === "deduct") return;
+      if (Number(card.main_type) === Number(mainType)) return;
+      try {
+        await api("/api/choose-type", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ticket: card.weight_bill_no,
+            date: card.biz_date,
+            main_type: Number(mainType),
+          }),
+        });
+        await refresh();
+      } catch (e) { alert(e.message); }
+    }
+
     async function doApprove() {
       const card = state.pending[state.selected];
       if (!card) return;
       if (card.kind === "deduct") return doApproveDeduct();
+      if (state.ui && state.ui.auto && card.auto_ok === false) {
+        alert("自动模式不写这张卡。请切回「监控当天」再批准。");
+        return;
+      }
+      if (card.in_band) {
+        alert("该料型已在±10%带内，不能批准。");
+        return;
+      }
       if (!confirm("确认把 " + card.plate + " 写入数据库？")) return;
       try {
         await api("/api/approve", {

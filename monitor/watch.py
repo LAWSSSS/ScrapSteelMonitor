@@ -99,6 +99,8 @@ class WatchController:
         for card in pending_fn(day_s, KIND_VOLUME):
             if (card.get("kind") or KIND_VOLUME) != KIND_VOLUME:
                 continue
+            if not card.get("auto_ok", True):
+                continue
             bill = str(card.get("weight_bill_no") or "")
             biz = str(card.get("biz_date") or day_s)
             try:
@@ -173,6 +175,7 @@ class WatchController:
                     day,
                     heartbeat_mode="watch-today",
                     notify_pending=False,
+                    max_manuals=3,
                 )
             except Exception as first:
                 if not is_retryable_db_error(first):
@@ -183,6 +186,7 @@ class WatchController:
                     day,
                     heartbeat_mode="watch-today",
                     notify_pending=False,
+                    max_manuals=3,
                 )
             pending = int(summary.get("pending") or 0)
             auto = self.is_auto()

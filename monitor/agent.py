@@ -38,6 +38,8 @@ def _run_scan(
     if auto:
         applied = []
         for card in list_pending(day.isoformat(), kind="volume"):
+            if not card.get("auto_ok", True):
+                continue
             result = approve(card["weight_bill_no"], card["biz_date"])
             applied.append(
                 {
@@ -69,7 +71,7 @@ def main() -> None:
         while True:
             day = today_cn()
             try:
-                summary = _run_scan(day, auto=args.auto, include_deduct=False)
+                summary = _run_scan(day, auto=args.auto, include_deduct=False, max_manuals=3)
                 write_heartbeat(
                     {
                         "last_scan_date": day.isoformat(),

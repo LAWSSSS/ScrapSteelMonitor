@@ -3,15 +3,23 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from datetime import date
+
+from monitor.correct import car_type_pcts, clamp_still_highest
 from monitor.scan import (
+    apply_type_choice,
     attach_human_fields,
+    avg_for_chosen_type,
+    default_chosen_type,
     humans_from_checks,
     judge_main_types,
+    plan_type_option,
     select_manual_checks,
 )
 
@@ -21,10 +29,17 @@ def _check(check_id: int, when: str, name: str = "A") -> dict:
 
 
 class SelectManualTests(unittest.TestCase):
-    def test_need_two(self) -> None:
-        self.assertEqual(select_manual_checks([_check(1, "2026-08-25 10:00:00")], 3), [])
+    def test_one_is_enough_for_volume(self) -> None:
+        picked = select_manual_checks([_check(1, "2026-08-25 10:00:00")], 3)
+        self.assertEqual([int(r["id"]) for r in picked], [1])
 
-    def test_watch_today_keeps_two_even_if_three_exist(self) -> None:
+    def test_deduct_still_needs_two(self) -> None:
+        self.assertEqual(
+            select_manual_checks([_check(1, "2026-08-25 10:00:00")], 3, min_manuals=2),
+            [],
+        )
+
+    def test_watch_today_keeps_two_if_capped(self) -> None:
         group = [
             _check(1, "2026-08-25 10:00:00", "甲"),
             _check(2, "2026-08-25 10:00:10", "乙"),
@@ -58,22 +73,50 @@ class JudgeMainTests(unittest.TestCase):
             {"steel_type": 1, "pct": 40.0, "name": "甲"},
             {"steel_type": 1, "pct": 40.0, "name": "乙"},
         ]
-        self.assertEqual(judge_main_types(humans), "")
+        gate = judge_main_types(humans)
+        self.assertEqual(gate.skip_reason, "")
+        self.assertTrue(gate.auto_ok)
+        self.assertFalse(gate.needs_choice)
+        self.assertEqual(gate.choosable, (1,))
+        self.assertEqual(gate.default_type, 1)
 
-    def test_two_disagree(self) -> None:
+    def test_one_allowed_not_auto(self) -> None:
+        humans = [{"steel_type": 2, "pct": 70.0, "name": "甲"}]
+        gate = judge_main_types(humans)
+        self.assertEqual(gate.skip_reason, "")
+        self.assertFalse(gate.auto_ok)
+        self.assertFalse(gate.needs_choice)
+        self.assertEqual(gate.choosable, (2,))
+        extra: dict = {}
+        attach_human_fields(extra, humans, gate.default_type)
+        self.assertEqual(extra["humans_used"], 1)
+        self.assertNotIn("human2", extra)
+        self.assertEqual(extra["avg"], 70.0)
+
+    def test_two_disagree_needs_choice(self) -> None:
         humans = [
             {"steel_type": 1, "pct": 40.0},
             {"steel_type": 2, "pct": 45.0},
         ]
-        self.assertEqual(judge_main_types(humans), "两人主料型不一致")
+        gate = judge_main_types(humans)
+        self.assertEqual(gate.skip_reason, "")
+        self.assertFalse(gate.auto_ok)
+        self.assertTrue(gate.needs_choice)
+        self.assertEqual(gate.choosable, (1, 2))
+        self.assertEqual(gate.default_type, 1)
 
-    def test_three_third_disagrees(self) -> None:
+    def test_three_third_disagrees_majority(self) -> None:
         humans = [
-            {"steel_type": 1, "pct": 40.0},
-            {"steel_type": 1, "pct": 40.0},
-            {"steel_type": 2, "pct": 45.0},
+            {"steel_type": 1, "pct": 80.0},
+            {"steel_type": 1, "pct": 70.0},
+            {"steel_type": 2, "pct": 90.0},
         ]
-        self.assertEqual(judge_main_types(humans), "三人主料型不一致")
+        gate = judge_main_types(humans)
+        self.assertTrue(gate.needs_choice)
+        self.assertFalse(gate.auto_ok)
+        self.assertEqual(gate.default_type, 1)
+        self.assertEqual(avg_for_chosen_type(humans, 1), 75.0)
+        self.assertEqual(avg_for_chosen_type(humans, 2), 90.0)
 
     def test_three_agree_average(self) -> None:
         humans = [
@@ -81,7 +124,9 @@ class JudgeMainTests(unittest.TestCase):
             {"steel_type": 1, "label": "重废1", "pct": 50.0, "name": "乙"},
             {"steel_type": 1, "label": "重废1", "pct": 30.0, "name": "丙"},
         ]
-        self.assertEqual(judge_main_types(humans), "")
+        gate = judge_main_types(humans)
+        self.assertEqual(gate.skip_reason, "")
+        self.assertTrue(gate.auto_ok)
         extra: dict = {}
         attach_human_fields(extra, humans)
         self.assertEqual(extra["humans_used"], 3)
@@ -93,7 +138,26 @@ class JudgeMainTests(unittest.TestCase):
             {"steel_type": 3, "pct": 80.0},
             {"steel_type": 3, "pct": 80.0},
         ]
-        self.assertIn("主料型不是重废1/2", judge_main_types(humans))
+        gate = judge_main_types(humans)
+        self.assertIn("主料型不是重废1/2", gate.skip_reason)
+
+    def test_zhongfei_plus_one_only_allows_heavy(self) -> None:
+        humans = [
+            {"steel_type": 11, "pct": 60.0},
+            {"steel_type": 11, "pct": 55.0},
+            {"steel_type": 1, "pct": 80.0},
+        ]
+        gate = judge_main_types(humans)
+        self.assertEqual(gate.choosable, (1,))
+        self.assertTrue(gate.needs_choice)
+        self.assertEqual(gate.default_type, 1)
+
+    def test_tie_picks_earliest(self) -> None:
+        humans = [
+            {"steel_type": 2, "pct": 90.0},
+            {"steel_type": 1, "pct": 80.0},
+        ]
+        self.assertEqual(default_chosen_type(humans, (1, 2)), 2)
 
     def test_humans_from_checks_picks_highest_rate(self) -> None:
         checks = [_check(10, "2026-08-25 10:00:00", "甲")]
@@ -106,6 +170,85 @@ class JudgeMainTests(unittest.TestCase):
         humans = humans_from_checks(checks, details)
         self.assertEqual(humans[0]["steel_type"], 1)
         self.assertEqual(humans[0]["pct"], 40.0)
+
+
+class ChooseTypeTests(unittest.TestCase):
+    def test_apply_type_choice_switches_option(self) -> None:
+        card = {
+            "weight_bill_no": "JC1",
+            "biz_date": "2026-08-28",
+            "main_type": 1,
+            "type_options": [
+                {"main_type": 1, "main_label": "重废1", "avg": 75.0, "target": 80.0, "ok": True},
+                {"main_type": 2, "main_label": "重废2", "avg": 90.0, "target": 88.0, "ok": True},
+            ],
+        }
+
+        saved: dict = {}
+
+        with patch("monitor.scan.load_pending", return_value=card), patch(
+            "monitor.scan.save_pending",
+            side_effect=lambda updated: saved.update(updated),
+        ):
+            out = apply_type_choice("JC1", "2026-08-28", 2)
+        self.assertEqual(out["main_type"], 2)
+        self.assertEqual(out["avg"], 90.0)
+        self.assertEqual(out["target"], 88.0)
+        self.assertTrue(out["type_chosen"])
+        self.assertEqual(saved.get("main_type"), 2)
+
+    def test_apply_type_choice_rejects_unknown(self) -> None:
+        card = {
+            "type_options": [{"main_type": 1, "main_label": "重废1", "ok": True}],
+        }
+        with patch("monitor.scan.load_pending", return_value=card):
+            with self.assertRaises(ValueError):
+                apply_type_choice("JC1", "2026-08-28", 2)
+
+
+class ClampAndRaiseTests(unittest.TestCase):
+    def test_clamp_keeps_band_when_current_leader_is_above(self) -> None:
+        out = clamp_still_highest(40.0, 40.0, 92.04)
+        self.assertIsNotNone(out)
+        self.assertAlmostEqual(out or 0.0, 40.0, places=2)
+
+    def test_raise_second_type_steals_from_leader(self) -> None:
+        rows: list[dict] = []
+        n = 0
+        for i in range(8):
+            uid = f"g{i}"  # one grab per loop
+            for st, vol in ((1, 92.0), (2, 5.0), (3, 3.0)):
+                n += 1
+                rows.append(
+                    {
+                        "id": n,
+                        "uuid": uid,
+                        "steel_type": st,
+                        "total_volume": vol,
+                        "is_hunliao": 0,
+                        "task_code": "t",
+                        "car_number": "测A",
+                        "flow_code": "f",
+                        "create_time": "2026-09-08 08:00:00",
+                    }
+                )
+        humans = [
+            {"steel_type": 2, "pct": 40.0, "name": "甲", "label": "重废2"},
+            {"steel_type": 1, "pct": 40.0, "name": "乙", "label": "重废1"},
+        ]
+        opt = plan_type_option(
+            day=date(2026, 9, 8),
+            humans=humans,
+            steel_type=2,
+            rows=rows,
+            pcts=car_type_pcts(rows),
+            hun={"is_mix": False},
+            seed="nc8136-like",
+            flip_uuids=[],
+            mix_after=0.1,
+        )
+        self.assertTrue(opt["ok"], opt.get("reason"))
+        self.assertGreater(opt["after_pcts"][2], opt["after_pcts"].get(1, 0))
 
 
 if __name__ == "__main__":

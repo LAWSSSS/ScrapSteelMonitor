@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
@@ -64,10 +65,13 @@ def _main_type(details: list[dict[str, Any]]) -> tuple[int | None, float]:
 def select_manual_checks(
     group: list[dict[str, Any]],
     max_manuals: int,
+    *,
+    min_manuals: int = 1,
 ) -> list[dict[str, Any]]:
-    """First 2 by time, or first 3 when reviewing history. Never invent a 3rd."""
+    """Earliest N manuals. Volume allows 1; deduct still passes min_manuals=2."""
     ordered = sorted(group, key=lambda r: (str(r["create_time"]), int(r["id"])))
-    if len(ordered) < 2:
+    need = max(1, int(min_manuals))
+    if len(ordered) < need:
         return []
     cap = 3 if int(max_manuals) >= 3 else 2
     return ordered[: min(cap, len(ordered))]
@@ -91,26 +95,100 @@ def humans_from_checks(
     return humans
 
 
-def judge_main_types(humans: list[dict[str, Any]]) -> str:
-    """Empty string = ok. All used humans must share one allowed main type."""
-    if len(humans) < 2:
-        return "未满2条人工"
+@dataclass
+class HumanGate:
+    skip_reason: str = ""
+    needs_choice: bool = False
+    auto_ok: bool = False
+    choosable: tuple[int, ...] = field(default_factory=tuple)
+    default_type: int | None = None
+
+
+def avg_for_chosen_type(humans: list[dict[str, Any]], steel_type: int | None) -> float:
+    if steel_type is None:
+        return 0.0
+    matched = [h for h in humans if h.get("steel_type") == steel_type]
+    if not matched:
+        return 0.0
+    return round(sum(float(h["pct"]) for h in matched) / len(matched), 2)
+
+
+def default_chosen_type(humans: list[dict[str, Any]], choosable: tuple[int, ...]) -> int:
+    allowed = {int(t) for t in choosable}
+    counts: dict[int, int] = {}
+    for human in humans:
+        raw = human.get("steel_type")
+        if raw not in allowed:
+            continue
+        key = int(raw)
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return next(iter(allowed))
+    top = max(counts.values())
+    majority = {t for t, n in counts.items() if n == top}
+    if len(majority) == 1:
+        return next(iter(majority))
+    for human in humans:
+        raw = human.get("steel_type")
+        if raw in majority:
+            return int(raw)
+    return next(iter(majority))
+
+
+def judge_main_types(humans: list[dict[str, Any]]) -> HumanGate:
+    """Who may be aligned, and whether auto-write is allowed."""
+    if not humans:
+        return HumanGate(skip_reason="未满1条人工")
     types = [h.get("steel_type") for h in humans]
-    if any(t is None for t in types) or len(set(types)) != 1:
-        return "三人主料型不一致" if len(humans) >= 3 else "两人主料型不一致"
-    main = int(types[0])
-    if main not in ALLOWED_MAIN_TYPES:
-        return f"主料型不是重废1/2（{steel_label(main)}）"
-    return ""
+    valid: list[int] = []
+    for raw in types:
+        if raw in ALLOWED_MAIN_TYPES:
+            key = int(raw)
+            if key not in valid:
+                valid.append(key)
+    if not valid:
+        first = types[0]
+        label = steel_label(int(first)) if first is not None else ""
+        return HumanGate(skip_reason=f"主料型不是重废1/2（{label}）")
+    choosable = tuple(valid)
+    all_typed = all(t is not None for t in types)
+    all_same = all_typed and len(set(int(t) for t in types)) == 1
+    if all_same and int(types[0]) in ALLOWED_MAIN_TYPES:
+        main = int(types[0])
+        return HumanGate(
+            auto_ok=len(humans) >= 2,
+            needs_choice=False,
+            choosable=(main,),
+            default_type=main,
+        )
+    return HumanGate(
+        auto_ok=False,
+        needs_choice=True,
+        choosable=choosable,
+        default_type=default_chosen_type(humans, choosable),
+    )
 
 
-def attach_human_fields(extra: dict[str, Any], humans: list[dict[str, Any]]) -> None:
+def attach_human_fields(
+    extra: dict[str, Any],
+    humans: list[dict[str, Any]],
+    chosen_type: int | None = None,
+) -> None:
     extra["humans_used"] = len(humans)
     extra["human1"] = humans[0]
-    extra["human2"] = humans[1]
+    if len(humans) >= 2:
+        extra["human2"] = humans[1]
+    else:
+        extra.pop("human2", None)
     if len(humans) >= 3:
         extra["human3"] = humans[2]
-    extra["avg"] = round(sum(float(h["pct"]) for h in humans) / len(humans), 2)
+    else:
+        extra.pop("human3", None)
+    if chosen_type is None and humans:
+        typed = {h.get("steel_type") for h in humans}
+        if len(typed) == 1 and next(iter(typed)) is not None:
+            chosen_type = int(next(iter(typed)))
+    extra["avg"] = avg_for_chosen_type(humans, chosen_type)
 
 
 _AI_KEYS = (
@@ -122,7 +200,12 @@ _AI_KEYS = (
     "gap",
     "target",
     "main_label",
+    "main_type",
     "task_code",
+    "auto_ok",
+    "needs_choice",
+    "humans_used",
+    "in_band",
 )
 
 
@@ -146,6 +229,143 @@ def _time_window(rows: list[dict[str, Any]]) -> tuple[str, str]:
     if not times:
         return "", ""
     return min(times), max(times)
+
+
+def plan_type_option(
+    *,
+    day: date,
+    humans: list[dict[str, Any]],
+    steel_type: int,
+    rows: list[dict[str, Any]],
+    pcts: dict[int, float],
+    hun: dict[str, Any],
+    seed: str,
+    flip_uuids: list[str],
+    mix_after: float,
+) -> dict[str, Any]:
+    avg = avg_for_chosen_type(humans, steel_type)
+    ai_pct = pcts.get(steel_type, 0.0)
+    display_pct, boost_pp = display_main_pct(ai_pct, day, is_mix=bool(hun["is_mix"]))
+    gap = abs(display_pct - avg)
+    in_band = gap < BAND_PP
+    option: dict[str, Any] = {
+        "main_type": steel_type,
+        "main_label": steel_label(steel_type),
+        "avg": avg,
+        "ai_pct": round(ai_pct, 2),
+        "display_pct": round(display_pct, 2),
+        "boost_pp": round(boost_pp, 1),
+        "compare_pct": round(display_pct, 2),
+        "gap": round(gap, 2),
+        "in_band": in_band,
+        "ok": False,
+        "reason": "",
+        "target": None,
+        "delta": None,
+        "ai_after": None,
+        "after_pcts": {},
+        "volume_updates": {},
+        "inserts": [],
+        "hunliao_ids": apply_hunliao_ids(rows, flip_uuids),
+        "flip_uuids": flip_uuids,
+        "mix_after": round(mix_after * 100.0, 1),
+        "grab_samples": [],
+        "volume_update_rows": 0,
+        "hunliao_update_rows": 0,
+        "insert_rows": 0,
+        "update_rows": 0,
+    }
+    if in_band:
+        option["reason"] = (
+            "真实占比已在±10%带内" if hun["is_mix"] else "非混料展示占比已在±10%带内"
+        )
+        return option
+    target, delta = pick_target_with_jitter(avg, seed)
+    other_max = max((v for k, v in pcts.items() if k != steel_type), default=0.0)
+    first = clamp_still_highest(target, avg, other_max)
+    band_high = min(99.5, avg + 9.7)
+    if first is None:
+        first = min(band_high, max(0.5, target))
+    attempts: list[tuple[float, str, float]] = [(first, seed, delta)]
+    if abs(first - band_high) >= 0.05:
+        attempts.append((band_high, f"{seed}|top", band_high - avg))
+    last_reason = ""
+    for cand, cand_seed, cand_delta in attempts:
+        vol = plan_volume(rows, steel_type, cand, cand_seed)
+        if not vol.ok:
+            last_reason = vol.reason or "体积方案失败"
+            continue
+        after_pcts = {int(k): round(v, 2) for k, v in vol.after_pcts.items()}
+        main_after = after_pcts.get(steel_type, 0.0)
+        others = [v for k, v in after_pcts.items() if k != steel_type]
+        if others and main_after <= max(others):
+            last_reason = "无法同时满足仍最高且落在10%带内"
+            continue
+        hun_ids = option["hunliao_ids"]
+        option.update(
+            {
+                "ok": True,
+                "target": round(cand, 2),
+                "delta": round(cand_delta, 2),
+                "ai_after": after_pcts.get(steel_type, round(cand, 2)),
+                "after_pcts": after_pcts,
+                "volume_updates": {str(k): v for k, v in vol.volume_updates.items()},
+                "inserts": vol.inserts,
+                "grab_samples": vol.grab_samples,
+                "volume_update_rows": len(vol.volume_updates),
+                "hunliao_update_rows": len(hun_ids),
+                "insert_rows": len(vol.inserts),
+                "update_rows": len(vol.volume_updates) + (1 if hun_ids else 0),
+            }
+        )
+        return option
+    option["reason"] = last_reason or "无法同时满足仍最高且落在10%带内"
+    return option
+
+
+def apply_option_to_card(card: dict[str, Any], option: dict[str, Any]) -> None:
+    for key in (
+        "main_type",
+        "main_label",
+        "avg",
+        "ai_pct",
+        "display_pct",
+        "boost_pp",
+        "compare_pct",
+        "gap",
+        "in_band",
+        "target",
+        "delta",
+        "ai_after",
+        "after_pcts",
+        "volume_updates",
+        "inserts",
+        "hunliao_ids",
+        "flip_uuids",
+        "mix_after",
+        "grab_samples",
+        "volume_update_rows",
+        "hunliao_update_rows",
+        "insert_rows",
+        "update_rows",
+    ):
+        card[key] = option.get(key)
+    card["reason"] = option.get("reason") or card.get("reason") or ""
+
+
+def apply_type_choice(weight_bill_no: str, day: str, main_type: int) -> dict[str, Any]:
+    card = load_pending(weight_bill_no, day)
+    if card is None:
+        raise FileNotFoundError(f"没有待审单 {weight_bill_no} {day}")
+    wanted = int(main_type)
+    options = card.get("type_options") or []
+    match = next((opt for opt in options if int(opt.get("main_type") or 0) == wanted), None)
+    if match is None:
+        raise ValueError("该料型不可选")
+    apply_option_to_card(card, match)
+    card["type_chosen"] = True
+    save_pending(card)
+    return card
 
 
 def scan_day(
@@ -217,7 +437,7 @@ def _scan_day_body(
         }
         chosen = select_manual_checks(group, max_manuals)
         if not chosen:
-            reason = "未满2条人工"
+            reason = "未满1条人工"
             skip_n += 1
             skip_reasons[reason] += 1
             vehicles.append({**base, "status": "skip", "reason": reason})
@@ -227,14 +447,18 @@ def _scan_day_body(
         humans = humans_from_checks(chosen, details_by_check)
         extra = {**base}
         attach_human_fields(extra, humans)
-        reason = judge_main_types(humans)
-        if reason:
+        gate = judge_main_types(humans)
+        extra["auto_ok"] = gate.auto_ok
+        extra["needs_choice"] = gate.needs_choice
+        extra["choosable"] = list(gate.choosable)
+        if gate.skip_reason:
             skip_n += 1
-            skip_reasons[reason] += 1
-            vehicles.append({**extra, "status": "skip", "reason": reason})
-            append_log("skip", {**extra, "reason": reason})
+            skip_reasons[gate.skip_reason] += 1
+            vehicles.append({**extra, "status": "skip", "reason": gate.skip_reason})
+            append_log("skip", {**extra, "reason": gate.skip_reason})
             continue
-        t1 = int(humans[0]["steel_type"])
+        assert gate.default_type is not None
+        attach_human_fields(extra, humans, gate.default_type)
 
         if is_processed(bill, day_s):
             reason = "该磅单+日期已处理"
@@ -243,7 +467,7 @@ def _scan_day_body(
             vehicles.append({**extra, "status": "done", "reason": reason})
             continue
         existing = load_pending(bill, day_s)
-        if existing and int(existing.get("humans_used") or 2) == len(humans):
+        if existing and int(existing.get("humans_used") or 0) == len(humans):
             vehicles.append(
                 merge_pending_ai({**extra, "status": "pending", "reason": "已在待审"}, existing)
             )
@@ -276,51 +500,17 @@ def _scan_day_body(
             continue
 
         pcts = car_type_pcts(rows)
-        ai_pct = pcts.get(t1, 0.0)
-        avg = float(extra["avg"])
         hun = hunliao_stats(rows)
-        display_pct, boost_pp = display_main_pct(ai_pct, day, is_mix=hun["is_mix"])
-        # 混料比库内真实占比；非混料比页面加幅后的展示占比
-        compare_pct = display_pct
-        gap = abs(compare_pct - avg)
         extra.update(
             {
                 "task_code": task_code,
                 "car_number": car_number,
-                "ai_pct": round(ai_pct, 2),
-                "display_pct": round(display_pct, 2),
-                "boost_pp": round(boost_pp, 1),
-                "compare_pct": round(compare_pct, 2),
-                "avg": round(avg, 2),
-                "gap": round(gap, 2),
                 "mix_before": round(hun["ratio"] * 100.0, 1),
                 "is_mix": hun["is_mix"],
+                "mix_note": "只翻到刚过55%，不拉到80%/100%",
             }
         )
-        if gap < BAND_PP:
-            if hun["is_mix"]:
-                reason = "真实占比已在±10%带内"
-            else:
-                reason = "非混料展示占比已在±10%带内"
-            skip_n += 1
-            skip_reasons[reason] += 1
-            vehicles.append({**extra, "status": "skip", "reason": reason})
-            append_log("skip", {**extra, "reason": reason})
-            continue
-
         seed = f"{bill}|{day_s}|{task_code}"
-        target, delta = pick_target_with_jitter(avg, seed)
-        other_max = max((v for k, v in pcts.items() if k != t1), default=0.0)
-        clamped = clamp_still_highest(target, avg, other_max)
-        if clamped is None:
-            reason = "无法同时满足仍最高且落在10%带内"
-            skip_n += 1
-            skip_reasons[reason] += 1
-            vehicles.append({**extra, "status": "skip", "reason": reason})
-            append_log("skip", {**extra, "reason": reason})
-            continue
-        target = clamped
-
         flip_uuids: list[str] = []
         mix_after = hun["ratio"]
         if not hun["is_mix"]:
@@ -335,9 +525,39 @@ def _scan_day_body(
             flip_uuids = hun_plan.uuids
             mix_after = hun_plan.mix_after
 
-        vol = plan_volume(rows, t1, target, seed)
-        if not vol.ok:
-            reason = vol.reason or "体积方案失败"
+        options = [
+            plan_type_option(
+                day=day,
+                humans=humans,
+                steel_type=steel_type,
+                rows=rows,
+                pcts=pcts,
+                hun=hun,
+                seed=seed if steel_type == gate.default_type else f"{seed}|{steel_type}",
+                flip_uuids=flip_uuids,
+                mix_after=mix_after,
+            )
+            for steel_type in gate.choosable
+        ]
+        preferred = gate.default_type
+        if existing and existing.get("main_type") is not None:
+            try:
+                kept = int(existing["main_type"])
+            except (TypeError, ValueError):
+                kept = None
+            if kept in gate.choosable:
+                preferred = kept
+        selected = next((opt for opt in options if int(opt["main_type"]) == preferred), options[0])
+        if not gate.needs_choice and selected.get("in_band"):
+            reason = str(selected.get("reason") or "已在±10%带内")
+            skip_n += 1
+            skip_reasons[reason] += 1
+            vehicles.append({**extra, "status": "skip", "reason": reason})
+            append_log("skip", {**extra, "reason": reason})
+            continue
+        usable = [opt for opt in options if opt.get("ok") or opt.get("in_band")]
+        if not usable:
+            reason = str(selected.get("reason") or "体积方案失败")
             skip_n += 1
             skip_reasons[reason] += 1
             vehicles.append({**extra, "status": "skip", "reason": reason})
@@ -346,36 +566,25 @@ def _scan_day_body(
 
         tmin, tmax = _time_window(rows)
         other_rows = max(0, int(car_totals.get(car_number, 0)) - int(today_by_car.get(car_number, 0)))
-        hun_ids = apply_hunliao_ids(rows, flip_uuids)
-        after_pcts = {int(k): round(v, 2) for k, v in vol.after_pcts.items()}
+        pending_reason = "需选主料型" if gate.needs_choice else (
+            "1条人工，自动不写" if not gate.auto_ok else "已在待审"
+        )
         card = {
             **extra,
             "kind": KIND_VOLUME,
             "status": "pending",
-            "main_type": t1,
-            "main_label": steel_label(t1),
-            "target": round(target, 2),
-            "delta": round(delta, 2),
-            "ai_after": after_pcts.get(t1, round(target, 2)),
-            "after_pcts": after_pcts,
-            "mix_after": round(mix_after * 100.0, 1),
-            "mix_note": "只翻到刚过55%，不拉到80%/100%",
-            "update_rows": len(vol.volume_updates) + (1 if hun_ids else 0),
-            "volume_update_rows": len(vol.volume_updates),
-            "hunliao_update_rows": len(hun_ids),
-            "insert_rows": len(vol.inserts),
+            "type_options": options,
+            "type_chosen": bool(existing and existing.get("type_chosen")),
+            "reason": pending_reason,
             "time_min": tmin,
             "time_max": tmax,
             "row_count": len(rows),
             "other_date_rows": other_rows,
-            "grab_samples": vol.grab_samples,
             "ids": [int(r["id"]) for r in rows],
-            "volume_updates": {str(k): v for k, v in vol.volume_updates.items()},
-            "hunliao_ids": hun_ids,
-            "flip_uuids": flip_uuids,
-            "inserts": vol.inserts,
             "auto": auto,
         }
+        apply_option_to_card(card, selected)
+        card["reason"] = pending_reason
         save_pending(card)
         pending_n += 1
         vehicles.append({
@@ -384,7 +593,9 @@ def _scan_day_body(
             "plate": plate,
             "kind": KIND_VOLUME,
             "status": "pending",
+            "reason": pending_reason,
             "main_label": card["main_label"],
+            "main_type": card["main_type"],
             "ai_pct": card["ai_pct"],
             "display_pct": card.get("display_pct"),
             "compare_pct": card.get("compare_pct"),
@@ -393,7 +604,12 @@ def _scan_day_body(
             "gap": card["gap"],
             "target": card["target"],
             "task_code": task_code,
-            "human1": card["human1"],
+            "human1": card.get("human1"),
+            "humans_used": card.get("humans_used"),
+            "manual_count": card.get("manual_count"),
+            "auto_ok": gate.auto_ok,
+            "needs_choice": gate.needs_choice,
+            "in_band": card.get("in_band"),
         })
         append_log("pending", {
             "weight_bill_no": bill,
@@ -401,6 +617,8 @@ def _scan_day_body(
             "plate": plate,
             "ai_pct": card["ai_pct"],
             "target": card["target"],
+            "auto_ok": gate.auto_ok,
+            "needs_choice": gate.needs_choice,
         })
 
     deduct_pending_n = 0
@@ -464,7 +682,7 @@ def _scan_deduct_day(
             "plate": plate,
             "manual_count": len(group),
         }
-        chosen = select_manual_checks(group, max_manuals)
+        chosen = select_manual_checks(group, max_manuals, min_manuals=2)
         if not chosen:
             continue
         tons = [row.get("deduction") for row in chosen]
@@ -530,7 +748,7 @@ def _scan_deduct_day(
             append_log("deduct_skip", {**extra, "reason": reason})
             continue
         pre = task_preprocess(task)
-        page = calculate_deduct(rows, net, pre, task.get("deduct_weight_rate"))
+        page = calculate_deduct(rows, net, pre)
         ai_kg = page.ai_kg
         gap = deduct_gap_kg(ai_kg, human_kg)
         extra.update(

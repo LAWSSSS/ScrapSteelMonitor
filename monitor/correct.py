@@ -500,10 +500,15 @@ def pick_target_with_jitter(avg_pct: float, seed: str) -> tuple[float, float]:
 
 
 def clamp_still_highest(target: float, avg: float, other_max: float) -> float | None:
-    """Keep target in (avg-10, avg+10), in (0.5, 99.5), and strictly above other_max."""
+    """Keep target in the ±10 band. other_max only lifts it when that still fits.
+
+    Do not abort when the *current* runner-up sits above the band: plan_volume
+    can steal from today's leader, so after-edit other_max is often lower.
+    """
     low = max(0.5, avg - 9.7)
     high = min(99.5, avg + 9.7)
-    need = other_max + 0.15
-    if need >= high or low >= high:
+    if low >= high:
         return None
-    return min(high, max(low, max(target, need)))
+    need = other_max + 0.15
+    preferred = max(target, need) if need < high else target
+    return min(high, max(low, preferred))

@@ -146,7 +146,15 @@ class WatchControllerTests(unittest.TestCase):
             return {"ok": True, "insert_ids": [1]}
 
         def fake_pending(day: str, kind: str = "volume") -> list[dict]:
-            return [{"weight_bill_no": "JC1", "biz_date": "2026-08-28", "plate": "桂A", "kind": "volume"}]
+            return [
+                {
+                    "weight_bill_no": "JC1",
+                    "biz_date": "2026-08-28",
+                    "plate": "桂A",
+                    "kind": "volume",
+                    "auto_ok": True,
+                }
+            ]
 
         ctl = WatchController(
             scan_fn=fake_scan,
@@ -185,6 +193,57 @@ class WatchControllerTests(unittest.TestCase):
         self.assertEqual(applied, [])
         self.assertEqual(ctl.snapshot()["last_pending"], 1)
 
+    def test_auto_skips_cards_not_auto_ok(self) -> None:
+        applied: list[tuple[str, str]] = []
+
+        def fake_apply(ticket: str, day: str) -> dict:
+            applied.append((ticket, day))
+            return {"ok": True}
+
+        ctl = WatchController(
+            scan_fn=lambda day, **kwargs: {"pending": 2, "skipped": 0},
+            today_fn=lambda: date(2026, 8, 28),
+            apply_fn=fake_apply,
+            pending_fn=lambda day, kind="volume": [
+                {
+                    "weight_bill_no": "ONE",
+                    "biz_date": "2026-08-28",
+                    "kind": "volume",
+                    "auto_ok": False,
+                },
+                {
+                    "weight_bill_no": "OK",
+                    "biz_date": "2026-08-28",
+                    "kind": "volume",
+                    "auto_ok": True,
+                },
+            ],
+            interval_sec=60,
+        )
+        ctl._retry_sleep_sec = 0
+        ctl.set_auto(True)
+        ctl._run_once()
+        self.assertEqual(applied, [("OK", "2026-08-28")])
+        self.assertEqual(ctl.snapshot()["last_auto_applied"], 1)
+        self.assertEqual(ctl.snapshot()["last_pending"], 1)
+
+    def test_watch_scan_asks_for_three_manuals(self) -> None:
+        seen: list[int] = []
+
+        def fake_scan(day: date, **kwargs: object) -> dict:
+            seen.append(int(kwargs.get("max_manuals") or 0))
+            return {"pending": 0, "skipped": 0}
+
+        ctl = WatchController(
+            scan_fn=fake_scan,
+            today_fn=lambda: date(2026, 8, 28),
+            interval_sec=60,
+        )
+        ctl._retry_sleep_sec = 0
+        ctl._run_once()
+        self.assertEqual(seen, [3])
+
 
 if __name__ == "__main__":
     unittest.main()
+

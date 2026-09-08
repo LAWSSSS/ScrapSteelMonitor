@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 from monitor.config import BAND_PP
 from monitor.correct import (
     apply_hunliao_ids,
+    clamp_still_highest,
     display_boost_pp,
     display_main_pct,
     hunliao_stats,
@@ -116,6 +117,11 @@ class VolumeTests(unittest.TestCase):
         plan = plan_volume(rows, 1, 88.0, "seed-up")
         self.assertTrue(plan.ok, plan.reason)
         self.assertGreater(plan.after_pcts[1], 80.0)
+
+    def test_clamp_allows_target_when_current_other_is_above_band(self) -> None:
+        out = clamp_still_highest(40.0, 40.0, 54.31)
+        self.assertIsNotNone(out)
+        self.assertLessEqual(out or 0.0, 49.7)
 
 
 class SummaryRowTests(unittest.TestCase):

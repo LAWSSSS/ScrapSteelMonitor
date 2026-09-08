@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 from monitor.config import DEDUCT_BAND_KG, KIND_DEDUCT, KIND_VOLUME
 from monitor.deduct import (
     apply_page_rules,
+    calculate_deduct,
     deduct_gap_kg,
     estimate_deduct_kg,
     human_deduct_kg,
@@ -53,6 +54,19 @@ class PageRuleTests(unittest.TestCase):
         self.assertAlmostEqual(page.base_kg, 601.51, places=2)
         self.assertAlmostEqual(page.ai_kg, 451.51, places=2)
         self.assertFalse(is_deduct_unqualified(page.ai_kg, 425.0))
+
+    def test_live_base_ignores_stale_rate_nd3039(self) -> None:
+        rows = [{"deduct_weight": 0.0141, "total_volume": 1.0}]
+        page = calculate_deduct(rows, 39160.0, 0.0, 0.0212)
+        self.assertAlmostEqual(page.base_kg, 552.16, places=2)
+        self.assertAlmostEqual(page.ai_kg, 402.16, places=2)
+        self.assertFalse(is_deduct_unqualified(page.ai_kg, 300.0))
+
+    def test_live_base_ay5106_in_band(self) -> None:
+        rows = [{"deduct_weight": 0.0051, "total_volume": 1.0}]
+        page = calculate_deduct(rows, 54620.0, 0.0, 0.0152)
+        self.assertAlmostEqual(page.ai_kg, 278.56, places=2)
+        self.assertFalse(is_deduct_unqualified(page.ai_kg, 246.67))
 
 
 class HumanTests(unittest.TestCase):

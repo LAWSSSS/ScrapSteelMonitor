@@ -30,7 +30,7 @@ from monitor.config import (
 )
 from monitor.db import format_db_error
 from monitor.restore import restore, restore_deduct
-from monitor.scan import merge_pending_ai, scan_day
+from monitor.scan import apply_type_choice, merge_pending_ai, scan_day
 from monitor.store import (
     MODE_WATCH,
     MODE_WATCH_AUTO,
@@ -296,6 +296,14 @@ class Handler(BaseHTTPRequestHandler):
                 save_ui_mode("review-history", day.isoformat())
                 write_heartbeat({"last_scan_date": day.isoformat(), "mode": "once"})
                 self._json(200, {"ok": True, "summary": summary, "ui": _ui_payload()})
+                return
+            if parsed.path == "/api/choose-type":
+                card = apply_type_choice(
+                    str(body["ticket"]),
+                    str(body["date"]),
+                    int(body["main_type"]),
+                )
+                self._json(200, {"ok": True, "card": card})
                 return
             if parsed.path == "/api/approve":
                 self._json(200, approve(str(body["ticket"]), str(body["date"])))

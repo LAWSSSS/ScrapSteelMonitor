@@ -49,12 +49,11 @@ def base_weight_kg(
     net_weight: float,
     deduct_weight_rate: Any = None,
 ) -> float:
-    """baseWeight = 四位扣重率 × 净重。有落库率时用落库率，和页面对齐。"""
+    """baseWeight = 当日 Σ杂质/Σ体积（四位）× 净重。落库率只作对照，不用来算。"""
+    del deduct_weight_rate
     net = float(net_weight)
     if net <= 0:
         return 0.0
-    if deduct_weight_rate is not None and _f(deduct_weight_rate) > 0:
-        return _f(deduct_weight_rate) * net
     return deduct_rate(rows) * net
 
 
