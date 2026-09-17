@@ -382,6 +382,7 @@
           <p class="meta">时间窗 ${card.time_min} — ${card.time_max}（必须落在 ${card.biz_date}）</p>
           <p class="meta">同车牌其它日期 ${card.other_date_rows} 行，本次 id 不含它们 · 该日行数 ${card.row_count}</p>
           <p class="meta">抽 3 个抓斗目标料型占比：${(card.grab_samples || []).join("% / ")}%</p>
+          <p class="meta">${card.reopen ? "这辆车已经改过。后续人工又超带，再改一次。" : ""}</p>
           <p class="meta">${autoNote}</p>
           <div class="row" style="margin-top:12px">
             <button class="primary" ${canApprove ? "" : "disabled"} onclick="doApprove()">${approveLabel}</button>
@@ -544,7 +545,7 @@
         <p class="meta">磅单 ${card.weight_bill_no}</p>
         <p class="meta"><code>${card.task_code || ""}</code></p>
         <p class="meta">时间窗 ${card.time_min || ""} — ${card.time_max || ""} · 该日行数 ${card.row_count || ""}</p>
-        <p class="meta">目标按核算扣杂填。写完会回读核算差；仍超 150 就按接近了多少再改一枪。</p>
+        <p class="meta">${card.reopen ? "这辆车扣重已经改过。后续人工又超 150kg，再改一次。" : "目标按核算扣杂填。写完会回读核算差；仍超 150 就按接近了多少再改一枪。"}</p>
         <div class="row" style="margin-top:12px">
           <label class="meta">目标 kg</label>
           <input id="deductTarget" type="number" min="0.01" step="0.01" placeholder="例如 380" style="width:120px" />

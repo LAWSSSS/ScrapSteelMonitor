@@ -34,6 +34,7 @@ from monitor.scan import apply_type_choice, merge_pending_ai, scan_day
 from monitor.store import (
     MODE_WATCH,
     MODE_WATCH_AUTO,
+    card_kind,
     is_processed,
     is_watch_mode,
     list_pending,
@@ -159,7 +160,12 @@ def overview(day: str) -> dict:
             continue
         card = pending_volume.get(str(raw.get("weight_bill_no") or "")) if kind == KIND_VOLUME else None
         v = merge_pending_ai(raw, card) if kind == KIND_VOLUME else dict(raw)
-        if is_processed(v.get("weight_bill_no", ""), day, kind):
+        bill = str(v.get("weight_bill_no") or "")
+        pending_here = any(
+            str(p.get("weight_bill_no") or "") == bill and card_kind(p) == kind
+            for p in pending
+        )
+        if is_processed(bill, day, kind) and not pending_here:
             v["status"] = "done"
         vehicles.append(relabel_vehicle_steels(v))
     return {

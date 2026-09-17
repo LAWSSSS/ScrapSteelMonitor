@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 from datetime import date
 
 from monitor.correct import car_type_pcts, clamp_still_highest
+from monitor.config import KIND_DEDUCT, KIND_VOLUME
 from monitor.scan import (
     apply_type_choice,
     attach_human_fields,
@@ -20,6 +21,7 @@ from monitor.scan import (
     humans_from_checks,
     judge_main_types,
     plan_type_option,
+    reopen_processed,
     select_manual_checks,
 )
 
@@ -249,6 +251,29 @@ class ClampAndRaiseTests(unittest.TestCase):
         )
         self.assertTrue(opt["ok"], opt.get("reason"))
         self.assertGreater(opt["after_pcts"][2], opt["after_pcts"].get(1, 0))
+
+
+class ReopenProcessedTests(unittest.TestCase):
+    def test_reopen_clears_volume_stamp(self) -> None:
+        with patch("monitor.scan.is_processed", return_value=True), patch(
+            "monitor.scan.unmark_processed"
+        ) as unmark:
+            self.assertTrue(reopen_processed("JC1", "2026-09-08"))
+            unmark.assert_called_once_with("JC1", "2026-09-08", KIND_VOLUME)
+
+    def test_reopen_clears_deduct_stamp(self) -> None:
+        with patch("monitor.scan.is_processed", return_value=True), patch(
+            "monitor.scan.unmark_processed"
+        ) as unmark:
+            self.assertTrue(reopen_processed("JC1", "2026-09-08", KIND_DEDUCT))
+            unmark.assert_called_once_with("JC1", "2026-09-08", KIND_DEDUCT)
+
+    def test_reopen_noop_when_not_stamped(self) -> None:
+        with patch("monitor.scan.is_processed", return_value=False), patch(
+            "monitor.scan.unmark_processed"
+        ) as unmark:
+            self.assertFalse(reopen_processed("JC1", "2026-09-08"))
+            unmark.assert_not_called()
 
 
 if __name__ == "__main__":

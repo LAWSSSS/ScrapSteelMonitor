@@ -48,6 +48,7 @@ from monitor.store import (
     mark_processed,
     remove_pending,
     save_pending,
+    unmark_processed,
     write_heartbeat,
     write_scan_summary,
 )
@@ -206,6 +207,7 @@ _AI_KEYS = (
     "needs_choice",
     "humans_used",
     "in_band",
+    "reopen",
 )
 
 
@@ -353,6 +355,14 @@ def apply_option_to_card(card: dict[str, Any], option: dict[str, Any]) -> None:
     card["reason"] = option.get("reason") or card.get("reason") or ""
 
 
+def reopen_processed(weight_bill_no: str, day: str, kind: str = KIND_VOLUME) -> bool:
+    """Remove the processed stamp so a later out-of-band scan can plan again."""
+    if not is_processed(weight_bill_no, day, kind):
+        return False
+    unmark_processed(weight_bill_no, day, kind)
+    return True
+
+
 def apply_type_choice(weight_bill_no: str, day: str, main_type: int) -> dict[str, Any]:
     card = load_pending(weight_bill_no, day)
     if card is None:
@@ -460,12 +470,8 @@ def _scan_day_body(
         assert gate.default_type is not None
         attach_human_fields(extra, humans, gate.default_type)
 
-        if is_processed(bill, day_s):
-            reason = "该磅单+日期已处理"
-            skip_n += 1
-            skip_reasons[reason] += 1
-            vehicles.append({**extra, "status": "done", "reason": reason})
-            continue
+        was_processed = is_processed(bill, day_s)
+        extra["was_processed"] = was_processed
         existing = load_pending(bill, day_s)
         if existing and int(existing.get("humans_used") or 0) == len(humans):
             vehicles.append(
@@ -511,6 +517,8 @@ def _scan_day_body(
             }
         )
         seed = f"{bill}|{day_s}|{task_code}"
+        if was_processed:
+            seed = f"{seed}|reopen|{len(humans)}"
         flip_uuids: list[str] = []
         mix_after = hun["ratio"]
         if not hun["is_mix"]:
@@ -549,6 +557,10 @@ def _scan_day_body(
                 preferred = kept
         selected = next((opt for opt in options if int(opt["main_type"]) == preferred), options[0])
         if not gate.needs_choice and selected.get("in_band"):
+            if was_processed:
+                reason = "该磅单+日期已处理"
+                vehicles.append({**extra, "status": "done", "reason": reason})
+                continue
             reason = str(selected.get("reason") or "已在±10%带内")
             skip_n += 1
             skip_reasons[reason] += 1
@@ -566,8 +578,11 @@ def _scan_day_body(
 
         tmin, tmax = _time_window(rows)
         other_rows = max(0, int(car_totals.get(car_number, 0)) - int(today_by_car.get(car_number, 0)))
-        pending_reason = "需选主料型" if gate.needs_choice else (
-            "1条人工，自动不写" if not gate.auto_ok else "已在待审"
+        reopened = reopen_processed(bill, day_s)
+        pending_reason = "已处理后续超带，再改" if reopened else (
+            "需选主料型" if gate.needs_choice else (
+                "1条人工，自动不写" if not gate.auto_ok else "已在待审"
+            )
         )
         card = {
             **extra,
@@ -582,6 +597,7 @@ def _scan_day_body(
             "other_date_rows": other_rows,
             "ids": [int(r["id"]) for r in rows],
             "auto": auto,
+            "reopen": reopened,
         }
         apply_option_to_card(card, selected)
         card["reason"] = pending_reason
@@ -610,6 +626,7 @@ def _scan_day_body(
             "auto_ok": gate.auto_ok,
             "needs_choice": gate.needs_choice,
             "in_band": card.get("in_band"),
+            "reopen": reopened,
         })
         append_log("pending", {
             "weight_bill_no": bill,
@@ -705,9 +722,8 @@ def _scan_deduct_day(
             extra["human3_t"] = (
                 None if chosen[2].get("deduction") is None else float(chosen[2]["deduction"])
             )
-        if is_processed(bill, day_s, KIND_DEDUCT):
-            vehicles.append({**extra, "status": "done", "reason": "该磅单+日期扣重已处理"})
-            continue
+        was_processed = is_processed(bill, day_s, KIND_DEDUCT)
+        extra["was_processed"] = was_processed
         flow = str(chosen[0].get("flow_code") or chosen[-1].get("flow_code") or "")
         task = tasks_by_flow.get(flow) if flow else None
         if task is None:
@@ -791,26 +807,33 @@ def _scan_deduct_day(
                         KIND_DEDUCT,
                     )
                 remove_pending(bill, day_s, KIND_DEDUCT)
+            if was_processed:
+                vehicles.append({**extra, "status": "done", "reason": "该磅单+日期扣重已处理"})
+                continue
             reason = "扣重差已在150kg内"
             skip_n += 1
             skip_reasons[reason] += 1
             vehicles.append({**extra, "status": "skip", "reason": reason})
             append_log("deduct_skip", {**extra, "reason": reason})
             continue
+        reopened = reopen_processed(bill, day_s, KIND_DEDUCT)
         existing = load_pending(bill, day_s, KIND_DEDUCT)
+        deduct_reason = "已处理后续扣重超带，再改" if reopened else "扣重待审"
         card = {
             **(existing or {}),
             **extra,
             "kind": KIND_DEDUCT,
             "status": "pending",
+            "reason": deduct_reason,
+            "reopen": reopened,
             "time_min": _time_window(rows)[0],
             "time_max": _time_window(rows)[1],
             "row_count": len(rows),
         }
         save_pending(card)
         pending_n += 1
-        vehicles.append({**extra, "status": "pending", "reason": "扣重待审"})
-        append_log("deduct_pending", {**extra, "gap_kg": extra["gap_kg"]})
+        vehicles.append({**extra, "status": "pending", "reason": deduct_reason, "reopen": reopened})
+        append_log("deduct_pending", {**extra, "gap_kg": extra["gap_kg"], "reopen": reopened})
 
     return {
         "vehicles": vehicles,
