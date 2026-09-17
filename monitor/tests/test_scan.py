@@ -16,7 +16,9 @@ from monitor.config import KIND_DEDUCT, KIND_VOLUME
 from monitor.scan import (
     apply_type_choice,
     attach_human_fields,
+    correctable_type_options,
     avg_for_chosen_type,
+    consensus_type_avgs,
     default_chosen_type,
     humans_from_checks,
     judge_main_types,
@@ -172,6 +174,7 @@ class JudgeMainTests(unittest.TestCase):
         humans = humans_from_checks(checks, details)
         self.assertEqual(humans[0]["steel_type"], 1)
         self.assertEqual(humans[0]["pct"], 40.0)
+        self.assertEqual(humans[0]["rates"], {1: 40.0, 2: 30.0})
 
 
 class ChooseTypeTests(unittest.TestCase):
@@ -251,6 +254,103 @@ class ClampAndRaiseTests(unittest.TestCase):
         )
         self.assertTrue(opt["ok"], opt.get("reason"))
         self.assertGreater(opt["after_pcts"][2], opt["after_pcts"].get(1, 0))
+
+
+class ConsensusAvgTests(unittest.TestCase):
+    """桂E60521: personal max differs, all-manual average still 重废2."""
+
+    def _e60521_humans(self) -> list[dict]:
+        return [
+            {
+                "steel_type": 2,
+                "pct": 35.0,
+                "name": "徐星星",
+                "rates": {2: 35.0, 11: 32.0, 1: 23.0, 3: 10.0},
+            },
+            {
+                "steel_type": 1,
+                "pct": 40.0,
+                "name": "陈魁",
+                "rates": {1: 40.0, 2: 30.0, 3: 20.0, 11: 10.0},
+            },
+        ]
+
+    def test_all_manual_avg_not_just_voters(self) -> None:
+        humans = self._e60521_humans()
+        self.assertEqual(avg_for_chosen_type(humans, 2), 32.5)
+        self.assertEqual(avg_for_chosen_type(humans, 1), 31.5)
+        main, avg, pcts = consensus_type_avgs(humans, (1, 2))
+        self.assertEqual(main, 2)
+        self.assertEqual(avg, 32.5)
+        self.assertEqual(pcts, {1: 31.5, 2: 32.5})
+
+    def test_default_follows_consensus_not_earliest_max(self) -> None:
+        humans = [
+            {
+                "steel_type": 1,
+                "pct": 40.0,
+                "rates": {1: 40.0, 2: 30.0},
+            },
+            {
+                "steel_type": 2,
+                "pct": 35.0,
+                "rates": {2: 35.0, 1: 23.0},
+            },
+        ]
+        self.assertEqual(default_chosen_type(humans, (1, 2)), 2)
+
+    def test_ai_vs_voter_in_band_but_consensus_out(self) -> None:
+        humans = self._e60521_humans()
+        opt = plan_type_option(
+            day=date(2026, 9, 16),
+            humans=humans,
+            steel_type=2,
+            rows=[],
+            pcts={2: 44.08, 1: 25.0, 11: 20.0, 3: 10.92},
+            hun={"is_mix": True},
+            seed="e60521",
+            flip_uuids=[],
+            mix_after=0.44,
+        )
+        self.assertEqual(opt["avg"], 32.5)
+        self.assertAlmostEqual(opt["gap"], 11.58, places=2)
+        self.assertFalse(opt["in_band"])
+        self.assertGreaterEqual(opt["gap"], 10.0)
+        self.assertLess(abs(44.08 - 35.0), 10.0)
+
+    def test_consensus_in_band_when_ai_lead_matches(self) -> None:
+        humans = self._e60521_humans()
+        opt = plan_type_option(
+            day=date(2026, 9, 16),
+            humans=humans,
+            steel_type=2,
+            rows=[],
+            pcts={2: 36.0, 1: 25.0, 11: 20.0, 3: 19.0},
+            hun={"is_mix": True},
+            seed="e60521-in",
+            flip_uuids=[],
+            mix_after=0.44,
+        )
+        self.assertTrue(opt["in_band"])
+        self.assertAlmostEqual(opt["gap"], 3.5, places=2)
+
+
+class CorrectableOptionTests(unittest.TestCase):
+    def test_both_in_band_not_correctable(self) -> None:
+        options = [
+            {"main_type": 2, "ok": False, "in_band": True},
+            {"main_type": 1, "ok": False, "in_band": True},
+        ]
+        self.assertEqual(correctable_type_options(options), [])
+
+    def test_out_of_band_ok_is_correctable(self) -> None:
+        options = [
+            {"main_type": 2, "ok": False, "in_band": True},
+            {"main_type": 1, "ok": True, "in_band": False},
+        ]
+        picked = correctable_type_options(options)
+        self.assertEqual(len(picked), 1)
+        self.assertEqual(picked[0]["main_type"], 1)
 
 
 class ReopenProcessedTests(unittest.TestCase):

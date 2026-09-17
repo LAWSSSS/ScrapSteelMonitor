@@ -63,6 +63,34 @@ def _main_type(details: list[dict[str, Any]]) -> tuple[int | None, float]:
     return int(best["steel_type"]), float(best["steel_rate"]) * 100.0
 
 
+def _rates_from_details(details: list[dict[str, Any]]) -> dict[int, float]:
+    rates: dict[int, float] = {}
+    for row in details:
+        rates[int(row["steel_type"])] = round(float(row["steel_rate"] or 0) * 100.0, 2)
+    return rates
+
+
+def _humans_have_rates(humans: list[dict[str, Any]]) -> bool:
+    return any(isinstance(human.get("rates"), dict) and human["rates"] for human in humans)
+
+
+def type_rate(human: dict[str, Any], steel_type: int) -> float:
+    """This manual's share of one type. Missing type is 0 when a full rate vector exists."""
+    rates = human.get("rates")
+    if isinstance(rates, dict) and rates:
+        raw = rates.get(int(steel_type), rates.get(str(steel_type), 0.0))
+        return float(raw or 0.0)
+    if human.get("steel_type") == steel_type:
+        return float(human.get("pct") or 0.0)
+    return 0.0
+
+
+def leading_type(pcts: dict[int, float]) -> int | None:
+    if not pcts:
+        return None
+    return max(pcts, key=lambda key: (float(pcts[key]), -int(key)))
+
+
 def select_manual_checks(
     group: list[dict[str, Any]],
     max_manuals: int,
@@ -84,13 +112,15 @@ def humans_from_checks(
 ) -> list[dict[str, Any]]:
     humans: list[dict[str, Any]] = []
     for row in checks:
-        steel_type, pct = _main_type(details_by_check.get(int(row["id"]), []))
+        details = details_by_check.get(int(row["id"]), [])
+        steel_type, pct = _main_type(details)
         humans.append(
             {
                 "name": row.get("operator_name"),
                 "steel_type": steel_type,
                 "label": steel_label(steel_type) if steel_type else "",
                 "pct": round(pct, 2),
+                "rates": _rates_from_details(details),
             }
         )
     return humans
@@ -106,16 +136,44 @@ class HumanGate:
 
 
 def avg_for_chosen_type(humans: list[dict[str, Any]], steel_type: int | None) -> float:
-    if steel_type is None:
+    """Mean of this type across all used manuals.
+
+    When each human has a full rate vector, a second-place 重废2 still enters
+    the 重废2 average. Without rates, fall back to averaging only voters of
+    that personal main type.
+    """
+    if steel_type is None or not humans:
         return 0.0
+    if _humans_have_rates(humans):
+        return round(sum(type_rate(h, int(steel_type)) for h in humans) / len(humans), 2)
     matched = [h for h in humans if h.get("steel_type") == steel_type]
     if not matched:
         return 0.0
     return round(sum(float(h["pct"]) for h in matched) / len(matched), 2)
 
 
+def consensus_type_avgs(
+    humans: list[dict[str, Any]],
+    choosable: tuple[int, ...],
+) -> tuple[int | None, float, dict[int, float]]:
+    """Winning type among choosable types, using the all-manual average."""
+    allowed = tuple(int(t) for t in choosable)
+    if not allowed:
+        return None, 0.0, {}
+    avgs = {t: avg_for_chosen_type(humans, t) for t in allowed}
+    votes = {t: sum(1 for h in humans if h.get("steel_type") == t) for t in allowed}
+    best = max(allowed, key=lambda t: (avgs[t], votes[t]))
+    if avgs[best] <= 0:
+        return None, 0.0, avgs
+    return best, avgs[best], avgs
+
+
 def default_chosen_type(humans: list[dict[str, Any]], choosable: tuple[int, ...]) -> int:
     allowed = {int(t) for t in choosable}
+    if _humans_have_rates(humans):
+        main, _, _ = consensus_type_avgs(humans, tuple(sorted(allowed)))
+        if main is not None:
+            return main
     counts: dict[int, int] = {}
     for human in humans:
         raw = human.get("steel_type")
@@ -249,7 +307,8 @@ def plan_type_option(
     ai_pct = pcts.get(steel_type, 0.0)
     display_pct, boost_pp = display_main_pct(ai_pct, day, is_mix=bool(hun["is_mix"]))
     gap = abs(display_pct - avg)
-    in_band = gap < BAND_PP
+    ai_lead = leading_type(pcts)
+    in_band = bool(avg) and gap < BAND_PP and ai_lead == steel_type
     option: dict[str, Any] = {
         "main_type": steel_type,
         "main_label": steel_label(steel_type),
@@ -353,6 +412,11 @@ def apply_option_to_card(card: dict[str, Any], option: dict[str, Any]) -> None:
     ):
         card[key] = option.get(key)
     card["reason"] = option.get("reason") or card.get("reason") or ""
+
+
+def correctable_type_options(options: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Options that can actually be written: planned, and still outside the ±10 band."""
+    return [opt for opt in options if opt.get("ok") and not opt.get("in_band")]
 
 
 def reopen_processed(weight_bill_no: str, day: str, kind: str = KIND_VOLUME) -> bool:
@@ -461,6 +525,10 @@ def _scan_day_body(
         extra["auto_ok"] = gate.auto_ok
         extra["needs_choice"] = gate.needs_choice
         extra["choosable"] = list(gate.choosable)
+        cons_type, cons_avg, cons_pcts = consensus_type_avgs(humans, gate.choosable)
+        extra["consensus_type"] = cons_type
+        extra["consensus_avg"] = cons_avg
+        extra["consensus_pcts"] = cons_pcts
         if gate.skip_reason:
             skip_n += 1
             skip_reasons[gate.skip_reason] += 1
@@ -474,11 +542,33 @@ def _scan_day_body(
         extra["was_processed"] = was_processed
         existing = load_pending(bill, day_s)
         if existing and int(existing.get("humans_used") or 0) == len(humans):
-            vehicles.append(
-                merge_pending_ai({**extra, "status": "pending", "reason": "已在待审"}, existing)
+            old_opts = existing.get("type_options")
+            keep_existing = (
+                bool(correctable_type_options(old_opts))
+                if old_opts
+                else not existing.get("in_band")
             )
-            pending_n += 1
-            continue
+            if keep_existing:
+                vehicles.append(
+                    merge_pending_ai({**extra, "status": "pending", "reason": "已在待审"}, existing)
+                )
+                pending_n += 1
+                continue
+            remove_pending(bill, day_s)
+            if existing.get("reopen") and not was_processed:
+                mark_processed(
+                    bill,
+                    day_s,
+                    {
+                        "kind": KIND_VOLUME,
+                        "plate": plate,
+                        "restored": True,
+                        "reason": "带内误重开，已收回已处理标记",
+                    },
+                )
+                was_processed = True
+                extra["was_processed"] = True
+            existing = None
 
         flow = str(chosen[0].get("flow_code") or chosen[-1].get("flow_code") or "")
         task = tasks_by_flow.get(flow) if flow else None
@@ -556,25 +646,41 @@ def _scan_day_body(
             if kept in gate.choosable:
                 preferred = kept
         selected = next((opt for opt in options if int(opt["main_type"]) == preferred), options[0])
-        if not gate.needs_choice and selected.get("in_band"):
+        consensus_opt = next(
+            (opt for opt in options if int(opt["main_type"]) == int(gate.default_type)),
+            selected,
+        )
+        if consensus_opt.get("in_band"):
             if was_processed:
                 reason = "该磅单+日期已处理"
                 vehicles.append({**extra, "status": "done", "reason": reason})
                 continue
-            reason = str(selected.get("reason") or "已在±10%带内")
+            reason = str(consensus_opt.get("reason") or "已在±10%带内")
             skip_n += 1
             skip_reasons[reason] += 1
             vehicles.append({**extra, "status": "skip", "reason": reason})
             append_log("skip", {**extra, "reason": reason})
             continue
-        usable = [opt for opt in options if opt.get("ok") or opt.get("in_band")]
-        if not usable:
-            reason = str(selected.get("reason") or "体积方案失败")
+        correctable = correctable_type_options(options)
+        if not correctable:
+            if was_processed:
+                reason = "该磅单+日期已处理"
+                vehicles.append({**extra, "status": "done", "reason": reason})
+                continue
+            if any(opt.get("in_band") for opt in options):
+                reason = str(selected.get("reason") or "已在±10%带内")
+            else:
+                reason = str(selected.get("reason") or "体积方案失败")
             skip_n += 1
             skip_reasons[reason] += 1
             vehicles.append({**extra, "status": "skip", "reason": reason})
             append_log("skip", {**extra, "reason": reason})
             continue
+        if selected.get("in_band") or not selected.get("ok"):
+            selected = next(
+                (opt for opt in correctable if int(opt["main_type"]) == int(gate.default_type)),
+                correctable[0],
+            )
 
         tmin, tmax = _time_window(rows)
         other_rows = max(0, int(car_totals.get(car_number, 0)) - int(today_by_car.get(car_number, 0)))

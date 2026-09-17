@@ -374,6 +374,7 @@
             <div><b>${card.insert_rows || 0}</b><span class="meta">将 INSERT</span></div>
           </div>
           <p class="meta">${humanPctLine(card)} · 随机差 ${card.delta != null ? card.delta : "—"}</p>
+          ${consensusLine(card) ? `<p class="meta">${consensusLine(card)}</p>` : ""}
           ${otherMainHint(card) ? `<p class="meta">${otherMainHint(card)}</p>` : ""}
           <p class="meta">${card.is_mix ? "混料不套区间加幅，对比用库内 " + card.ai_pct + "%" : "非混料库内 " + card.ai_pct + "%" + (card.boost_pp ? " +" + card.boost_pp + "pp → 展示 " + card.display_pct + "%" : "（本区间不加幅）展示 " + (card.display_pct != null ? card.display_pct : card.ai_pct) + "%")}</p>
           <p class="meta">改后其它料型：${others || "—"}</p>
@@ -458,11 +459,21 @@
     function avgLabel(card) {
       const typeName = card.main_label || steelLabel(card.main_type);
       const typed = typeName ? "该料型（" + typeName + "）" : "该料型";
+      if (card.consensus_avg != null) return "全员平均（" + (typeName || "该料型") + "）";
       if (card.needs_choice) return typed + "人工平均";
       const n = humansUsed(card);
       if (n <= 1) return typed + "人工";
       if (n >= 3) return typed + "三人平均";
       return typed + "两人平均";
+    }
+
+    function consensusLine(card) {
+      const pcts = card.consensus_pcts || {};
+      const keys = Object.keys(pcts);
+      if (!keys.length) return "";
+      const bits = keys.map((k) => steelLabel(k) + " " + pcts[k] + "%");
+      const lead = card.main_label || steelLabel(card.consensus_type || card.main_type);
+      return "全员平均 " + bits.join(" / ") + "，按 " + lead + " 主导修正";
     }
 
     function humanPiece(human, idx) {
