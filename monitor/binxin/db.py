@@ -249,12 +249,13 @@ def load_check_rows(
 
 
 def count_grabs(flows: list[str]) -> dict[str, int]:
+    """一次抓斗是一个 uuid，下面挂 1~4 行不同料型。数行数会把抓斗数放大三四倍。"""
     uniq = [f for f in dict.fromkeys(flows) if f]
     if not uniq:
         return {}
     rows = fetch_all(
         """
-        SELECT flow_code, COUNT(*) AS cnt
+        SELECT flow_code, COUNT(DISTINCT uuid) AS cnt
         FROM intelli_task_check
         WHERE flow_code = ANY(%s)
         GROUP BY flow_code
