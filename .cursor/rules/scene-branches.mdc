@@ -1,0 +1,13 @@
+---
+description: 盛隆/镔鑫分场景分支约定，改代码前先对应当前分支
+alwaysApply: true
+---
+
+# 场景分支
+
+- `shenglong`：只改盛隆。不要把盛隆专有逻辑直接推到 `main` 或 `binxin`。
+- `binxin`：只改镔鑫。不要把镔鑫改动 merge / cherry-pick 进 `main` 或 `shenglong`。
+- `main`：公共框架。只收两边都适用的改动（抽公共、扫描骨架、看板壳子、共享约定）。
+- `shenglong` 与 `main` 同步：偶尔把 `main` 上的公共提交 merge / cherry-pick 到 `shenglong`。不是两条线永远同一份代码。
+- 开工前先 `git branch --show-current`。盛隆任务切 `shenglong`，镔鑫任务切 `binxin`，公共抽离切 `main`。
+- 不要从 `binxin` 向 `main` 或 `shenglong` 开合并。镔鑫若有可复用段，先在 `main` 重做成场景无关提交，再分别同步。
