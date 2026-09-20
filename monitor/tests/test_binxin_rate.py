@@ -26,6 +26,7 @@ from monitor.binxin.materials import (
 from monitor.binxin.rate import (
     BAND_MARGIN_PP,
     DIFF_RATE_MISMATCH,
+    RAW_MARGIN_PP,
     SEGMENTS,
     band_window,
     diff_rate,
@@ -271,6 +272,25 @@ class FeasibilityTests(unittest.TestCase):
 
     def test_lead_floor_is_zero_without_rivals(self) -> None:
         self.assertEqual(lead_floor({(JINGLU, 1): 100.0}, (JINGLU, 1)), 0.0)
+
+    def test_target_stays_clear_of_segment_boundaries(self) -> None:
+        """目标不能压在 50 / 75 / 85 / 95 这些断点上，那里映射是跳的。"""
+        edges = [seg.lo for seg in SEGMENTS[1:]] + [seg.hi for seg in SEGMENTS[:-1]]
+        for human in (50.0, 55.0, 60.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0):
+            for current in (1.0, 30.0, 49.0, 60.0, 80.0, 94.36, 99.91):
+                target = pick_raw_target(human, current)
+                if target is None:
+                    continue
+                with self.subTest(human=human, current=current, target=round(target, 3)):
+                    for edge in edges:
+                        self.assertGreaterEqual(abs(target - edge), RAW_MARGIN_PP - 1e-9)
+
+    def test_su_gv2796_does_not_land_on_95(self) -> None:
+        """苏GV2796：人工 80%，原始 94.36%。最近的解在 95 上方，但不能取 95.00 本身。"""
+        target = pick_raw_target(80.0, 94.36)
+        assert target is not None
+        self.assertGreater(target, 95.0 + RAW_MARGIN_PP - 1e-9)
+        self.assertTrue(in_band(80.0, display_main_pct(target), same_main_type=True))
 
     def test_raising_display_can_require_lowering_raw(self) -> None:
         """苏GA1778 原始 99.91% 展示只有 89.91%，人工 100% 要求展示 >= 90%。"""

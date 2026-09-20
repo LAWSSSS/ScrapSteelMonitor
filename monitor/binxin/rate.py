@@ -27,6 +27,11 @@ DISPLAY_TOL_PP = 0.05
 TIE_TOL_PP = 0.01
 #: 反演时把区间右端收进段内。分段是左闭右开的，x=95 属于 95-100 那段而非恒等段。
 RAW_EPS_PP = 0.01
+#: 反演出的原始占比至少离分段边界这么远。
+#:
+#: 边界上映射是跳变的：94.99 展示 94.99，95.00 展示 85.00，差 10pp。落库的体积和后端重算
+#: 出来的占比会有末位级别的漂移，正好压在断点上就等于把 10pp 的结果交给舍入去赌。
+RAW_MARGIN_PP = 0.5
 #: 摊平其余料型时，占比低于这个数的料型不算能接货的对手。
 RIVAL_MIN_PP = 1.0
 #: 反演目标展示占比时，再往带内缩这么多，避免贴着边界落库后被取整推出去。
@@ -171,8 +176,11 @@ def raw_windows_for_display(lo: float, hi: float) -> list[tuple[float, float]]:
         if seg is not last:
             # 区间右端是开的：x=95 属于下一段（映射到 85），不属于恒等段。
             x_hi = min(x_hi, seg.hi - RAW_EPS_PP)
-            if x_hi < x_lo:
-                continue
+        # 只从段边界往里缩，落在段中间的区间不受影响。
+        x_lo = max(x_lo, seg.lo + RAW_MARGIN_PP)
+        x_hi = min(x_hi, seg.hi - RAW_MARGIN_PP)
+        if x_hi < x_lo:
+            continue
         windows.append((x_lo, x_hi))
     # 不合并相邻区间：跨段合并后中间的原始占比会映射到目标区间之外。
     windows.sort()
