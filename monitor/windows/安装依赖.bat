@@ -31,11 +31,14 @@ if errorlevel 1 (
 
 if not exist "monitor\.env" (
   copy "monitor\.env.example" "monitor\.env" >nul
-  echo 已生成 monitor\.env，请用记事本打开，把 MYSQL_PASSWORD 填上。
+  echo 已生成 monitor\.env，请用记事本打开填密码：
+  echo   盛隆看板要 MYSQL_PASSWORD，镔鑫看板要 BINXIN_PG_PASSWORD。
+  echo   只开一个场景就只填对应那一个。
 ) else (
   echo monitor\.env 已存在，未覆盖。
 )
 
 echo.
-echo 装好了。下一步：填写密码后，双击 启动看板.bat
+echo 装好了。下一步：填写密码后，双击 启动看板.bat（盛隆）
+echo 或 启动镔鑫看板.bat（镔鑫）。两个可以同时开。
 pause
