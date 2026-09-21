@@ -54,11 +54,11 @@ def _run_scan(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    parser = argparse.ArgumentParser(description="废钢检判扫描（默认不写库）")
+    parser = argparse.ArgumentParser(description="废钢检判扫描（默认只生成待确认结果）")
     parser.add_argument("--date", help="业务日 YYYY-MM-DD")
     parser.add_argument("--once", action="store_true", help="只扫一次")
     parser.add_argument("--watch-today", action="store_true", help="每5分钟扫今天")
-    parser.add_argument("--auto", action="store_true", help="跳过审核直接写库")
+    parser.add_argument("--auto", action="store_true", help="跳过逐车确认，直接应用结果")
     parser.add_argument("--interval", type=int, default=WATCH_INTERVAL_SEC)
     parser.add_argument("--no-mouse", action="store_true", help="不启动 VPN 鼠标保活")
     args = parser.parse_args()

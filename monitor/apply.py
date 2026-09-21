@@ -88,9 +88,9 @@ def _insert_statements(card: dict[str, Any]) -> list[tuple[str, tuple[Any, ...]]
 def approve(weight_bill_no: str, day: str) -> dict[str, Any]:
     card = load_pending(weight_bill_no, day)
     if card is None:
-        raise FileNotFoundError(f"没有待审单 {weight_bill_no} {day}")
+        raise FileNotFoundError(f"没有待确认记录 {weight_bill_no} {day}")
     if card.get("in_band"):
-        raise ValueError("该料型展示占比已在±10%带内，不能批准")
+        raise ValueError("该料型展示占比已在±10%带内，无需再次应用")
     biz = parse_day(day)
     rows = load_check_rows(
         str(card["task_code"]),
@@ -99,7 +99,7 @@ def approve(weight_bill_no: str, day: str) -> dict[str, Any]:
         include_images=True,
     )
     if not rows:
-        raise RuntimeError("写库前重新读取明细为空，已中止")
+        raise RuntimeError("应用前重新读取明细为空，已中止")
     inserts = rebuild_inserts(card.get("inserts") or [], rows)
     flip_uuids = [str(x) for x in (card.get("flip_uuids") or [])]
     if not flip_uuids and card.get("hunliao_ids"):
@@ -114,7 +114,7 @@ def approve(weight_bill_no: str, day: str) -> dict[str, Any]:
         + _insert_statements(card_exec)
     )
     if not stmts:
-        raise RuntimeError("待审单没有可执行的 UPDATE/INSERT")
+        raise RuntimeError("待确认记录没有可执行的调整")
     insert_ids = execute_guarded(stmts)
     update_rollback_with_inserts(paths["rollback"], card_exec, rows, insert_ids)
     mark_processed(
@@ -150,7 +150,7 @@ def reject(weight_bill_no: str, day: str, kind: str = KIND_VOLUME) -> dict[str, 
         return reject_deduct(weight_bill_no, day)
     card = load_pending(weight_bill_no, day)
     if card is None:
-        raise FileNotFoundError(f"没有待审单 {weight_bill_no} {day}")
+        raise FileNotFoundError(f"没有待确认记录 {weight_bill_no} {day}")
     remove_pending(weight_bill_no, day)
     append_log(
         "rejected",
@@ -208,7 +208,7 @@ def _deduct_live(card: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, 
 def approve_deduct(weight_bill_no: str, day: str, target_kg: float) -> dict[str, Any]:
     card = load_pending(weight_bill_no, day, KIND_DEDUCT)
     if card is None:
-        raise FileNotFoundError(f"没有扣重待审单 {weight_bill_no} {day}")
+        raise FileNotFoundError(f"没有扣重待确认记录 {weight_bill_no} {day}")
     rows, before = _deduct_live(card)
     plan = plan_deduct_scale(
         rows,
@@ -293,7 +293,7 @@ def approve_deduct(weight_bill_no: str, day: str, target_kg: float) -> dict[str,
 def refresh_deduct(weight_bill_no: str, day: str) -> dict[str, Any]:
     card = load_pending(weight_bill_no, day, KIND_DEDUCT)
     if card is None:
-        raise FileNotFoundError(f"没有扣重待审单 {weight_bill_no} {day}")
+        raise FileNotFoundError(f"没有扣重待确认记录 {weight_bill_no} {day}")
     _rows, after = _deduct_live(card)
     card.update(
         {
@@ -337,7 +337,7 @@ def reject_deduct(weight_bill_no: str, day: str) -> dict[str, Any]:
 
     card = load_pending(weight_bill_no, day, KIND_DEDUCT)
     if card is None:
-        raise FileNotFoundError(f"没有扣重待审单 {weight_bill_no} {day}")
+        raise FileNotFoundError(f"没有扣重待确认记录 {weight_bill_no} {day}")
     restored = False
     if card.get("written") and card.get("original_backup"):
         restore_deduct(ticket=weight_bill_no, day=day, file=card["original_backup"].get("snapshot"))

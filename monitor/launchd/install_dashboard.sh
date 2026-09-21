@@ -9,7 +9,7 @@ sed -e "s|__REPO_ROOT__|${REPO}|g" -e "s|__PYTHON__|${PYTHON}|g" \
 launchctl unload "$DEST" 2>/dev/null || true
 launchctl load "$DEST"
 echo "已装看板保活: $DEST"
-echo "打开 http://127.0.0.1:8765 ，在页面里选「监控当天」或「审核历史日」"
+echo "打开 http://127.0.0.1:8765 ，在页面里选「监控当天」或「复核历史日」"
 MOUSE_DEST="$HOME/Library/LaunchAgents/com.slzj.vpn-mouse.plist"
 sed -e "s|__REPO_ROOT__|${REPO}|g" -e "s|__PYTHON__|${PYTHON}|g" \
   "$REPO/monitor/launchd/com.slzj.vpn-mouse.plist" > "$MOUSE_DEST"

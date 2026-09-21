@@ -15,7 +15,7 @@ from monitor.apply import reject
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    parser = argparse.ArgumentParser(description="拒绝待审单，不写库")
+    parser = argparse.ArgumentParser(description="暂不应用待确认结果")
     parser.add_argument("--ticket", required=True)
     parser.add_argument("--date", required=True)
     args = parser.parse_args()

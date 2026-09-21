@@ -15,7 +15,7 @@ from monitor.apply import approve
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    parser = argparse.ArgumentParser(description="批准待审单并写库")
+    parser = argparse.ArgumentParser(description="确认并应用待确认结果")
     parser.add_argument("--ticket", required=True)
     parser.add_argument("--date", required=True)
     args = parser.parse_args()
