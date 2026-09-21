@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
 from monitor.binxin.materials import Key, canonical, is_graded, label, priority_rank
-from monitor.binxin.rate import in_band, main_key, normalize
+from monitor.binxin.rate import display_main_pct, in_band, main_key, normalize
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,12 @@ LEAD_GAP_PP = 1.5
 TARGET_TOL_PP = 0.35
 #: 抓斗之间目标料型占比的极差至少要有这么多 pp，否则太齐整。
 MIN_SPREAD_PP = 3.0
+#: 实际达成的原始占比在 ±TARGET_TOL_PP 内抖动时，展示占比允许的最大跳动（pp）。
+#:
+#: rate.RAW_MARGIN_PP 管的是"目标值"离断点多远，但搬体积只能搬到 ±TARGET_TOL_PP 的精度，
+#: 达成值可能比目标更靠近断点。x=95 处映射会掉 10pp，真骑在上面就等于把结果交给舍入去赌，
+#: 所以这里对达成值再直接验一次。
+CLIFF_SWING_LIMIT_PP = 1.5
 
 
 def _rng(seed: str) -> random.Random:
@@ -356,6 +362,17 @@ def _emit_changes(
                 plan.volume_updates[int(row["id"])] = new_value
 
 
+def _cliff_swing_pp(raw_pct: float) -> float:
+    """把原始占比上下各挪 TARGET_TOL_PP，看展示占比最多跳多少 pp。
+
+    不去枚举分段边界，直接测"我关心的那件事"：达成值附近的映射稳不稳。
+    """
+    here = display_main_pct(raw_pct)
+    lo = display_main_pct(max(0.0, raw_pct - TARGET_TOL_PP))
+    hi = display_main_pct(min(100.0, raw_pct + TARGET_TOL_PP))
+    return max(abs(here - lo), abs(here - hi), abs(hi - lo))
+
+
 def _siblings(
     by_uuid: dict[str, dict[Key, list[dict[str, Any]]]],
     uid: str,
@@ -403,6 +420,14 @@ def _finalize(
     if len(plan.grab_shares) > 2 and plan.spread_pp < MIN_SPREAD_PP:
         plan.ok = False
         plan.reason = f"各抓斗占比太齐（极差 {plan.spread_pp:.2f}pp），像是改出来的"
+        return
+    swing = _cliff_swing_pp(got)
+    if swing > CLIFF_SWING_LIMIT_PP:
+        plan.ok = False
+        plan.reason = (
+            f"改后原始占比 {got:.2f}% 贴着映射断点：在 ±{TARGET_TOL_PP}pp 内展示占比会跳 "
+            f"{swing:.1f}pp，结果不可控"
+        )
         return
     if human_pct is not None:
         display = plan.after_display_pcts.get(target_key, 0.0)

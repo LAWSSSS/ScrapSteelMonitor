@@ -18,6 +18,7 @@ import psycopg2
 import psycopg2.extras
 
 from monitor.binxin.config import pg_settings
+from monitor.binxin.guard import assert_write_allowed
 from monitor.config import day_bounds
 from monitor.sql_guard import assert_safe_sql
 
@@ -82,6 +83,9 @@ def format_db_error(exc: BaseException) -> str:
 
 
 def _open_connection(*, writable: bool = False) -> psycopg2.extensions.connection:
+    if writable:
+        # 唯一能开可写连接的地方，闸口挂在这里，新增写路径也自动被挡。
+        assert_write_allowed()
     settings = pg_settings()
     last: BaseException | None = None
     for attempt in range(3):
@@ -194,7 +198,8 @@ def load_steel_type_stats(flows: list[str]) -> dict[str, list[dict[str, Any]]]:
         return {}
     rows = fetch_all(
         """
-        SELECT flow_code, task_code, steel_type, steel_level, steel_volume, steel_rate, steel_weight
+        SELECT id, flow_code, task_code, car_number, station_number, data_type,
+               steel_type, steel_level, steel_volume, steel_rate, steel_weight, create_time
         FROM steel_type_stat
         WHERE flow_code = ANY(%s)
         """,
@@ -265,15 +270,39 @@ def count_grabs(flows: list[str]) -> dict[str, int]:
     return {str(r["flow_code"]): int(r["cnt"]) for r in rows}
 
 
-def execute_guarded(statements: list[tuple[str, tuple[Any, ...]]]) -> None:
-    """一个事务里跑完所有 UPDATE/INSERT。任一条失败就整体回滚。"""
+def execute_guarded(statements: list[tuple[str, tuple[Any, ...]]]) -> list[int]:
+    """一个事务里跑完所有 UPDATE/INSERT。任一条失败就整体回滚。
+
+    返回带 RETURNING id 的语句新建出来的 id，回滚脚本要靠它把新增行置零。
+    写库封锁闸在 _open_connection 里，这里不满足条件会在开连接时就抛。
+    """
+    new_ids: list[int] = []
     with connect(writable=True) as conn:
         try:
             with conn.cursor() as cur:
                 for sql, params in statements:
                     assert_safe_sql(sql)
                     cur.execute(sql, params)
+                    if cur.description is not None:
+                        for row in cur.fetchall():
+                            new_ids.append(int(row[0]))
             conn.commit()
         except Exception:
             conn.rollback()
             raise
+    return new_ids
+
+
+def reread_stat_rows(flow_code: str) -> list[dict[str, Any]]:
+    """写库后回读汇总表，用来核对结果，不能只信写进去的值。"""
+    rows = fetch_all(
+        """
+        SELECT id, flow_code, task_code, car_number, station_number, data_type,
+               steel_type, steel_level, steel_rate, steel_volume, steel_weight, create_time
+        FROM steel_type_stat
+        WHERE flow_code = %s
+        ORDER BY id
+        """,
+        (flow_code,),
+    )
+    return [row_plain(r) for r in rows]

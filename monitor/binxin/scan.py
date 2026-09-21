@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Iterable
 
-from monitor.binxin import db
+from monitor.binxin import db, store
 from monitor.binxin.config import MIN_GRABS_TO_CORRECT
 from monitor.binxin.materials import Key, canonical, from_manual, is_graded, label, priority_rank
 from monitor.binxin.rate import (
@@ -31,6 +31,7 @@ from monitor.binxin.rate import (
     normalize,
     pick_raw_target,
 )
+from monitor.config import TZ
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,11 @@ PLAN_SCALE = "其余料型等比缩放"
 PLAN_RESHAPE = "需摊平其余料型"
 
 
+def _round(value: float | None, digits: int = 2) -> float | None:
+    """卡片上的数都收到小数位。落盘和看板都读这一份，不能带一长串浮点尾数。"""
+    return None if value is None else round(float(value), digits)
+
+
 @dataclass
 class Vehicle:
     """一车的判定结果。in_band 为真或 skip_reason 非空时 plan 为 None。"""
@@ -57,6 +63,9 @@ class Vehicle:
     flow_code: str
     checked_at: str
     grabs: int
+    task_code: str = ""
+    net_weight: float = 0.0
+    station_number: Any = None
     human_pcts: dict[Key, float] = field(default_factory=dict)
     ai_raw_pcts: dict[Key, float] = field(default_factory=dict)
     ai_display_pcts: dict[Key, float] = field(default_factory=dict)
@@ -73,13 +82,20 @@ class Vehicle:
             "car_number": self.car_number,
             "order_code": self.order_code,
             "flow_code": self.flow_code,
+            "task_code": self.task_code,
             "checked_at": self.checked_at,
             "grabs": self.grabs,
+            "net_weight": self.net_weight,
+            "station_number": self.station_number,
             "human_main": label(self.human_main) if self.human_main else "",
-            "human_main_pct": self.human_pcts.get(self.human_main) if self.human_main else None,
+            "human_main_pct": _round(
+                self.human_pcts.get(self.human_main) if self.human_main else None
+            ),
             "ai_main": label(self.ai_main) if self.ai_main else "",
-            "ai_main_pct": self.ai_display_pcts.get(self.ai_main) if self.ai_main else None,
-            "diff_rate_pct": self.diff_rate_pct,
+            "ai_main_pct": _round(
+                self.ai_display_pcts.get(self.ai_main) if self.ai_main else None
+            ),
+            "diff_rate_pct": _round(self.diff_rate_pct, 1),
             "ok": self.ok,
             "skip_reason": self.skip_reason,
             "human_pcts": {label(k): round(v, 2) for k, v in self.human_pcts.items()},
@@ -103,8 +119,13 @@ class Plan:
 
     def as_card(self) -> dict[str, Any]:
         lo, hi = band_window(self.human_pct)
+        # band_window 是差异率定义的纯公式，人工 95% 时上界会算到 104.5%。展示占比不可能
+        # 超过 100%，所以报给人看的时候截到 100，免得看板上出现不存在的区间。
+        hi = min(hi, 100.0)
         return {
             "target": label(self.target_key),
+            # JSON 存不了元组键，落盘成两个整数，批准时再还原。
+            "target_key": [self.target_key[0], self.target_key[1]],
             "current_raw_pct": round(self.current_raw_pct, 2),
             "target_raw_pct": round(self.target_raw_pct, 2),
             "target_display_pct": round(self.target_display_pct, 2),
@@ -128,10 +149,31 @@ def human_pcts_of(rows: Iterable[dict[str, Any]]) -> dict[Key, float]:
     return human_final_pcts(triples)
 
 
+def primary_stat_group(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """只取一组 data_type。
+
+    近 30 天每个 flow 都只有 data_type=1 一组，但表结构允许多组，真出现多组时把它们一起
+    求和会让占比翻倍。这里固定挑行数最多的那组（并列取 data_type 最小），并记一条日志。
+    """
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(int(row.get("data_type") or 0), []).append(row)
+    if len(groups) <= 1:
+        return next(iter(groups.values()), [])
+    picked = min(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    logger.warning(
+        "flow 有 %s 组 data_type（%s），只用 data_type=%s",
+        len(groups),
+        sorted(groups),
+        picked[0],
+    )
+    return picked[1]
+
+
 def ai_raw_pcts_of(rows: Iterable[dict[str, Any]]) -> dict[Key, float]:
     """steel_type_stat 行 → AI 原始占比。按 steel_volume 算，重废并级。"""
     volumes: dict[Key, float] = {}
-    for row in rows:
+    for row in primary_stat_group(rows):
         key = canonical(row.get("steel_type"), row.get("steel_level"))
         volumes[key] = volumes.get(key, 0.0) + float(row.get("steel_volume") or 0.0)
     total = sum(volumes.values())
@@ -219,7 +261,7 @@ def plan_correction(
 
 
 def scan_day(day: date) -> list[Vehicle]:
-    """扫一天。一条连接拉完所有表，再在内存里按车分组判定。"""
+    """扫一天。一条连接拉完所有表，再在内存里按车分组判定。只读。"""
     with db.session():
         cars = db.load_day_cars(day)
         flows = [str(c["flow_code"]) for c in cars]
@@ -230,15 +272,65 @@ def scan_day(day: date) -> list[Vehicle]:
     out: list[Vehicle] = []
     for car in cars:
         flow = str(car["flow_code"])
-        out.append(
-            judge(
-                car,
-                stats.get(flow, []),
-                manuals.get(str(car["order_code"]), []),
-                grabs.get(flow, 0),
-            )
+        vehicle = judge(
+            car,
+            stats.get(flow, []),
+            manuals.get(str(car["order_code"]), []),
+            grabs.get(flow, 0),
         )
+        vehicle.task_code = str((stats.get(flow) or [{}])[0].get("task_code") or "")
+        vehicle.net_weight = float(car.get("net_weight") or 0.0)
+        vehicle.station_number = car.get("station_number")
+        out.append(vehicle)
     return out
+
+
+def pending_card(vehicle: Vehicle, day: date) -> dict[str, Any]:
+    """待审单。批准时要用的字段都在里面，不必再回头查扫描结果。"""
+    if vehicle.plan is None:
+        raise ValueError(f"{vehicle.car_number} 没有方案，不能进待审")
+    return {
+        **vehicle.as_card(),
+        "biz_date": day.isoformat(),
+        "task_code": vehicle.task_code,
+        "net_weight": vehicle.net_weight,
+        "station_number": vehicle.station_number,
+        "target_key": [vehicle.plan.target_key[0], vehicle.plan.target_key[1]],
+        "target_raw_pct": round(vehicle.plan.target_raw_pct, 4),
+        "human_main_pct": round(vehicle.plan.human_pct, 4),
+        "status": "pending",
+    }
+
+
+def queue_day(day: date) -> dict[str, Any]:
+    """扫一天并把要修正的车写进待审队列。本地写文件，不写库。
+
+    已经批准过的车不再重新入队；已在待审里的车用新方案覆盖，避免拿着旧目标占比去批准。
+    """
+    vehicles = scan_day(day)
+    day_text = day.isoformat()
+    queued: list[str] = []
+    for vehicle in vehicles:
+        if vehicle.plan is None:
+            continue
+        if store.is_processed(vehicle.flow_code, day_text):
+            continue
+        store.save_pending(pending_card(vehicle, day))
+        queued.append(vehicle.car_number)
+    summary = {
+        "date": day_text,
+        "scanned_at": datetime.now(TZ).isoformat(timespec="seconds"),
+        "total": len(vehicles),
+        "counts": summarize(vehicles),
+        "queued": queued,
+        "vehicles": [v.as_card() for v in vehicles],
+    }
+    store.save_scan_summary(day_text, summary)
+    store.append_log(
+        "scanned",
+        {"biz_date": day_text, "total": len(vehicles), "queued": len(queued)},
+    )
+    return summary
 
 
 def summarize(vehicles: list[Vehicle]) -> dict[str, int]:

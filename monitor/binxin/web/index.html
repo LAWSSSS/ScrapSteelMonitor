@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>镔鑫检判修正看板</title>
+  <style>
+    :root {
+      --bg: #f4f2ec;
+      --ink: #1c1b16;
+      --muted: #6b675c;
+      --line: #d8d3c4;
+      --card: #fffcf5;
+      --warn: #9a3412;
+      --ok: #166534;
+      --bad: #991b1b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+      background: var(--bg); color: var(--ink);
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 28px 20px 64px; }
+    h1 { font-size: 24px; margin: 0 0 4px; font-weight: 650; }
+    h2 { font-size: 16px; margin: 28px 0 10px; }
+    .sub { color: var(--muted); margin-bottom: 18px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    [hidden] { display: none !important; }
+    input[type=date], button, select, input[type=number] {
+      border: 1px solid var(--line); background: #fff; color: var(--ink);
+      padding: 7px 12px; border-radius: 6px; font: inherit;
+    }
+    button { cursor: pointer; }
+    button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+    button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
+    button.ghost { background: transparent; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .lock {
+      border: 2px solid var(--bad); background: #fef2f2; color: var(--bad);
+      border-radius: 10px; padding: 12px 16px; margin: 8px 0 18px;
+    }
+    .lock.open { border-color: var(--warn); background: #fff7ed; color: var(--warn); }
+    .lock b { font-size: 16px; }
+    .lock p { margin: 6px 0 0; font-size: 13px; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0; }
+    .stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+    .stat b { display: block; font-size: 26px; font-weight: 650; }
+    .stat span { color: var(--muted); font-size: 13px; }
+    .stat.warn b { color: var(--warn); }
+    .stat.ok b { color: var(--ok); }
+    .notice { border: 1px solid var(--line); background: #fff; padding: 10px 12px; border-radius: 8px; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }
+    th { color: var(--muted); font-weight: 550; }
+    tr.clickable { cursor: pointer; }
+    tr.clickable:hover { background: #fffaf0; }
+    .tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: #efece3; color: var(--muted); }
+    .tag.ok { background: #dcfce7; color: var(--ok); }
+    .tag.todo { background: #ffedd5; color: var(--warn); }
+    .tag.skip { background: #ede9e2; color: var(--muted); }
+    .tag.done { background: #dbeafe; color: #1e40af; }
+    .bad { color: var(--bad); }
+    .detail { background: #fffdf7; }
+    .detail td { padding: 14px 16px; }
+    .cmp { width: auto; border: none; background: transparent; }
+    .cmp th, .cmp td { border-bottom: 1px solid var(--line); padding: 5px 14px 5px 0; }
+    .cmp td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .plan { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    .plan dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+    .plan dt { color: var(--muted); font-size: 13px; }
+    .plan dd { margin: 0; font-variant-numeric: tabular-nums; }
+    .log { color: var(--muted); font-size: 13px; }
+    .err { color: var(--bad); margin: 10px 0; }
+    @media (max-width: 900px) { .stats { grid-template-columns: 1fr 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>镔鑫检判修正看板</h1>
+    <p class="sub">本机 127.0.0.1 · 差异率 = |人工主料型占比 − AI主料型展示占比| ÷ 人工主料型占比，主料型不一致记 100% · 超 10% 才进待审</p>
+
+    <div class="lock" id="lock">
+      <b id="lockTitle">写库状态未知</b>
+      <p id="lockDetail"></p>
+      <div class="row" style="margin-top:10px">
+        <input type="number" id="armMinutes" value="30" min="1" max="240" style="width:90px" />
+        <span class="log">分钟</span>
+        <button class="danger" id="armBtn">解锁写库</button>
+        <button class="ghost" id="disarmBtn">立刻锁死</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <span>业务日</span>
+      <input type="date" id="day" />
+      <button class="primary" id="scanBtn">扫描该日</button>
+      <button class="ghost" id="refreshBtn">只刷新看板</button>
+    </div>
+
+    <div class="err" id="err" hidden></div>
+
+    <div class="stats">
+      <div class="stat"><b id="sTotal">—</b><span>当日车次</span></div>
+      <div class="stat ok"><b id="sOk">—</b><span>在带内</span></div>
+      <div class="stat warn"><b id="sTodo">—</b><span>待修正</span></div>
+      <div class="stat"><b id="sDone">—</b><span>已落库</span></div>
+    </div>
+
+    <div class="notice" id="notice">先选业务日，再点「扫描该日」。扫描只读库，不会改任何数据。</div>
+
+    <h2>车次</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>车牌</th><th>检判时间</th><th>抓斗</th>
+          <th>人工主料型</th><th>AI主料型</th>
+          <th>人工占比</th><th>AI原始</th><th>AI展示</th>
+          <th>差异率</th><th>结论</th>
+        </tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="10" class="log">还没有扫描结果</td></tr></tbody>
+    </table>
+
+    <h2>最近操作</h2>
+    <div id="logs" class="log">—</div>
+  </main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let DATA = { vehicles: [], pending: {}, processed: {} };
+let OPEN = null;
+
+function fmtPct(v) {
+  return (v === null || v === undefined || v === "") ? "—" : Number(v).toFixed(2) + "%";
+}
+
+function showErr(text) {
+  const box = $("err");
+  box.hidden = !text;
+  box.textContent = text || "";
+}
+
+async function api(path, body) {
+  const opts = body
+    ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    : {};
+  const res = await fetch(path, opts);
+  const data = await res.json();
+  if (!res.ok || data.error) throw new Error(data.error || ("HTTP " + res.status));
+  return data;
+}
+
+function renderLock(lock) {
+  const box = $("lock");
+  box.classList.toggle("open", !!lock.allowed);
+  if (lock.allowed) {
+    const mins = Math.max(1, Math.round(lock.seconds_left / 60));
+    $("lockTitle").textContent = "写库已解锁";
+    $("lockDetail").textContent = `还有约 ${mins} 分钟自动锁回（到 ${lock.armed_until}）。批准会真正改库，改前自动存快照和回滚脚本。`;
+  } else {
+    $("lockTitle").textContent = "写库已封锁 · 批准按钮不可用";
+    $("lockDetail").textContent = "还差：" + (lock.blockers || []).join("；");
+  }
+  $("armBtn").disabled = !lock.env_ok;
+  $("armBtn").title = lock.env_ok ? "" : "需要先在环境变量里设置 BINXIN_ALLOW_WRITE=yes-i-approve";
+}
+
+function cmpTable(v) {
+  const names = new Set([
+    ...Object.keys(v.human_pcts || {}),
+    ...Object.keys(v.ai_raw_pcts || {}),
+    ...Object.keys(v.ai_display_pcts || {}),
+  ]);
+  const rows = [...names].map((name) => {
+    const h = (v.human_pcts || {})[name];
+    const r = (v.ai_raw_pcts || {})[name];
+    const d = (v.ai_display_pcts || {})[name];
+    return { name, h, r, d, sort: Math.max(h || 0, r || 0, d || 0) };
+  }).sort((a, b) => b.sort - a.sort);
+  const body = rows.map((x) => `<tr>
+      <td>${x.name}</td>
+      <td class="num">${fmtPct(x.h)}</td>
+      <td class="num">${fmtPct(x.r)}</td>
+      <td class="num">${fmtPct(x.d)}</td>
+    </tr>`).join("");
+  return `<table class="cmp">
+      <thead><tr><th>料型</th><th class="num">人工</th><th class="num">AI原始</th><th class="num">AI展示</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+
+function planBlock(v) {
+  const p = v.plan;
+  if (!p) return "";
+  const card = DATA.pending[v.flow_code];
+  const lock = DATA.lock || {};
+  const canApprove = !!card && !!lock.allowed;
+  let why = "";
+  if (!card) why = "这辆车不在待审队列里，先扫描该日。";
+  else if (!lock.allowed) why = "写库封锁中，先在上方解锁。";
+  return `<div class="plan">
+      <dl>
+        <dt>修正目标</dt><dd>${p.target}</dd>
+        <dt>方式</dt><dd>${p.method}</dd>
+        <dt>原始占比</dt><dd>${fmtPct(p.current_raw_pct)} → ${fmtPct(p.target_raw_pct)}</dd>
+        <dt>展示占比</dt><dd>改后约 ${fmtPct(p.target_display_pct)}，人工带 ${fmtPct(p.band_lo_pct)} ～ ${fmtPct(p.band_hi_pct)}</dd>
+        <dt>保持最高下界</dt><dd>${fmtPct(p.lead_floor_pct)}</dd>
+      </dl>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" ${canApprove ? "" : "disabled"}
+          onclick="approve('${v.flow_code}')">批准并落库</button>
+        <button class="ghost" ${card ? "" : "disabled"}
+          onclick="reject('${v.flow_code}')">退回</button>
+        <span class="log">${why}</span>
+      </div>
+    </div>`;
+}
+
+function statusTag(v) {
+  if (DATA.processed[v.flow_code]) return '<span class="tag done">已落库</span>';
+  if (v.ok) return '<span class="tag ok">在带内</span>';
+  if (v.plan) return '<span class="tag todo">待修正</span>';
+  return `<span class="tag skip">${v.skip_reason || "未分类"}</span>`;
+}
+
+function render() {
+  const s = DATA.counts || {};
+  $("sTotal").textContent = DATA.total ?? "—";
+  $("sOk").textContent = s["在带内"] ?? 0;
+  $("sTodo").textContent = s["待修正"] ?? 0;
+  $("sDone").textContent = Object.keys(DATA.processed || {}).length;
+  $("notice").textContent = DATA.notice || "";
+  renderLock(DATA.lock || {});
+
+  const list = DATA.vehicles || [];
+  if (!list.length) {
+    $("rows").innerHTML = '<tr><td colspan="10" class="log">这一天没有车次，或还没有扫描</td></tr>';
+  } else {
+    $("rows").innerHTML = list.map((v) => {
+      const diff = v.diff_rate_pct;
+      const diffTxt = (diff === null || diff === undefined) ? "—" : Number(diff).toFixed(1) + "%";
+      const diffCls = (diff !== null && diff !== undefined && diff > 10) ? "bad" : "";
+      const open = OPEN === v.flow_code;
+      const main = `<tr class="clickable" onclick="toggle('${v.flow_code}')">
+          <td>${v.car_number || "—"}</td>
+          <td>${(v.checked_at || "").slice(5, 16)}</td>
+          <td>${v.grabs ?? "—"}</td>
+          <td>${v.human_main || "—"}</td>
+          <td>${v.ai_main || "—"}</td>
+          <td>${fmtPct(v.human_main_pct)}</td>
+          <td>${fmtPct((v.ai_raw_pcts || {})[v.ai_main])}</td>
+          <td>${fmtPct(v.ai_main_pct)}</td>
+          <td class="${diffCls}">${diffTxt}</td>
+          <td>${statusTag(v)}</td>
+        </tr>`;
+      if (!open) return main;
+      return main + `<tr class="detail"><td colspan="10">
+          ${cmpTable(v)}
+          ${planBlock(v)}
+          <p class="log" style="margin-top:10px">运单 ${v.order_code || "—"} · flow ${v.flow_code}</p>
+        </td></tr>`;
+    }).join("");
+  }
+  $("logs").innerHTML = (DATA.logs || []).slice().reverse().map((l) =>
+    `<div>${l.ts} · ${l.event} · ${l.car_number || l.biz_date || ""}</div>`
+  ).join("") || "—";
+}
+
+function toggle(flow) {
+  OPEN = OPEN === flow ? null : flow;
+  render();
+}
+
+async function load() {
+  showErr("");
+  try {
+    DATA = await api("/api/overview?date=" + encodeURIComponent($("day").value));
+    render();
+  } catch (e) { showErr(String(e.message || e)); }
+}
+
+async function scan() {
+  showErr("");
+  $("scanBtn").disabled = true;
+  $("scanBtn").textContent = "扫描中…";
+  try {
+    await api("/api/scan", { date: $("day").value });
+    await load();
+  } catch (e) { showErr(String(e.message || e)); }
+  $("scanBtn").disabled = false;
+  $("scanBtn").textContent = "扫描该日";
+}
+
+async function approve(flow) {
+  const v = (DATA.vehicles || []).find((x) => x.flow_code === flow);
+  const name = v ? v.car_number : flow;
+  if (!confirm(`确认把 ${name} 的检判结果写进镔鑫库？\n\n写前会自动存快照和回滚脚本。`)) return;
+  showErr("");
+  try {
+    const res = await api("/api/approve", { flow: flow, date: $("day").value });
+    await load();
+    const tail = res.in_band
+      ? "回读已在带内。"
+      : "注意：回读仍不在带内，回滚脚本 " + (res.backup || {}).rollback;
+    alert(`${name} 已落库：改 ${res.updated_rows} 行、新增 ${res.inserted_rows} 行。${tail}`);
+  } catch (e) { showErr(String(e.message || e)); }
+}
+
+async function reject(flow) {
+  showErr("");
+  try {
+    await api("/api/reject", { flow: flow, date: $("day").value });
+    await load();
+  } catch (e) { showErr(String(e.message || e)); }
+}
+
+async function setLock(on) {
+  showErr("");
+  try {
+    await api("/api/lock", on ? { action: "arm", minutes: Number($("armMinutes").value) } : { action: "disarm" });
+    await load();
+  } catch (e) { showErr(String(e.message || e)); }
+}
+
+$("scanBtn").onclick = scan;
+$("refreshBtn").onclick = load;
+$("armBtn").onclick = () => {
+  if (confirm("解锁后「批准并落库」会真正修改镔鑫库的检判结果。确认解锁？")) setLock(true);
+};
+$("disarmBtn").onclick = () => setLock(false);
+$("day").valueAsDate = new Date();
+load();
+setInterval(() => { if (!OPEN) load(); }, 30000);
+</script>
+</body>
+</html>

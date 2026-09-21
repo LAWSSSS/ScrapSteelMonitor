@@ -5,6 +5,7 @@ monitor/pending/
 monitor/backups/
 monitor/db_dumps/
 monitor/logs/
+monitor/binxin_state/
 __pycache__/
 *.pyc
 .DS_Store
