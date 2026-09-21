@@ -183,7 +183,7 @@ def _sanitize_insert_statements(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    parser = argparse.ArgumentParser(description="按磅单号+日期 UPDATE 回滚")
+    parser = argparse.ArgumentParser(description="按磅单号+日期恢复原结果")
     parser.add_argument("--ticket", required=True)
     parser.add_argument("--date", required=True)
     parser.add_argument("--file", default=None, help="指定快照 json")

@@ -113,7 +113,7 @@ class WatchController:
                 applied.append(rec)
                 append_log("auto_approved", rec)
             except Exception as exc:
-                logger.exception("自动批准失败 %s", bill)
+                logger.exception("自动应用失败 %s", bill)
                 append_log(
                     "auto_approve_error",
                     {"weight_bill_no": bill, "plate": card.get("plate"), "error": str(exc)},
@@ -195,13 +195,13 @@ class WatchController:
                 pending = max(0, pending - len(applied))
                 if applied:
                     notify(
-                        "检判已自动写库",
-                        f"{day} 自动批准 {len(applied)} 辆。打开 http://127.0.0.1:8765 看流水",
+                        "检判结果已自动应用",
+                        f"{day} 自动应用 {len(applied)} 辆。打开 http://127.0.0.1:8765 看流水",
                     )
             elif pending > prev_pending:
                 notify(
-                    "检判待审核",
-                    f"{day} 有 {pending} 辆车待审，打开 http://127.0.0.1:8765",
+                    "检判结果待确认",
+                    f"{day} 有 {pending} 辆车待确认，打开 http://127.0.0.1:8765",
                 )
             now = datetime.now(TZ)
             nxt = now + timedelta(seconds=self._interval)

@@ -430,7 +430,7 @@ def reopen_processed(weight_bill_no: str, day: str, kind: str = KIND_VOLUME) -> 
 def apply_type_choice(weight_bill_no: str, day: str, main_type: int) -> dict[str, Any]:
     card = load_pending(weight_bill_no, day)
     if card is None:
-        raise FileNotFoundError(f"没有待审单 {weight_bill_no} {day}")
+        raise FileNotFoundError(f"没有待确认记录 {weight_bill_no} {day}")
     wanted = int(main_type)
     options = card.get("type_options") or []
     match = next((opt for opt in options if int(opt.get("main_type") or 0) == wanted), None)
@@ -550,7 +550,7 @@ def _scan_day_body(
             )
             if keep_existing:
                 vehicles.append(
-                    merge_pending_ai({**extra, "status": "pending", "reason": "已在待审"}, existing)
+                    merge_pending_ai({**extra, "status": "pending", "reason": "已在待确认"}, existing)
                 )
                 pending_n += 1
                 continue
@@ -563,7 +563,7 @@ def _scan_day_body(
                         "kind": KIND_VOLUME,
                         "plate": plate,
                         "restored": True,
-                        "reason": "带内误重开，已收回已处理标记",
+                        "reason": "带内误重开，已收回已应用标记",
                     },
                 )
                 was_processed = True
@@ -652,7 +652,7 @@ def _scan_day_body(
         )
         if consensus_opt.get("in_band"):
             if was_processed:
-                reason = "该磅单+日期已处理"
+                reason = "该磅单+日期已应用"
                 vehicles.append({**extra, "status": "done", "reason": reason})
                 continue
             reason = str(consensus_opt.get("reason") or "已在±10%带内")
@@ -664,7 +664,7 @@ def _scan_day_body(
         correctable = correctable_type_options(options)
         if not correctable:
             if was_processed:
-                reason = "该磅单+日期已处理"
+                reason = "该磅单+日期已应用"
                 vehicles.append({**extra, "status": "done", "reason": reason})
                 continue
             if any(opt.get("in_band") for opt in options):
@@ -685,9 +685,9 @@ def _scan_day_body(
         tmin, tmax = _time_window(rows)
         other_rows = max(0, int(car_totals.get(car_number, 0)) - int(today_by_car.get(car_number, 0)))
         reopened = reopen_processed(bill, day_s)
-        pending_reason = "已处理后续超带，再改" if reopened else (
+        pending_reason = "已应用后续超带，再调整" if reopened else (
             "需选主料型" if gate.needs_choice else (
-                "1条人工，自动不写" if not gate.auto_ok else "已在待审"
+                "1条人工，不自动应用" if not gate.auto_ok else "已在待确认"
             )
         )
         card = {
@@ -775,7 +775,10 @@ def _scan_day_body(
     write_heartbeat({"last_scan_date": day_s, "mode": heartbeat_mode, "pending": pending_n})
     if notify_pending and pending_n:
         extra = f"，其中扣重 {deduct_pending_n}" if deduct_pending_n else ""
-        notify("检判待审核", f"{day_s} 有 {pending_n} 辆车待审{extra}，打开 http://127.0.0.1:8765")
+        notify(
+            "检判结果待确认",
+            f"{day_s} 有 {pending_n} 辆车待确认{extra}，打开 http://127.0.0.1:8765",
+        )
     return summary
 
 
@@ -914,7 +917,7 @@ def _scan_deduct_day(
                     )
                 remove_pending(bill, day_s, KIND_DEDUCT)
             if was_processed:
-                vehicles.append({**extra, "status": "done", "reason": "该磅单+日期扣重已处理"})
+                vehicles.append({**extra, "status": "done", "reason": "该磅单+日期扣重已应用"})
                 continue
             reason = "扣重差已在150kg内"
             skip_n += 1
@@ -924,7 +927,7 @@ def _scan_deduct_day(
             continue
         reopened = reopen_processed(bill, day_s, KIND_DEDUCT)
         existing = load_pending(bill, day_s, KIND_DEDUCT)
-        deduct_reason = "已处理后续扣重超带，再改" if reopened else "扣重待审"
+        deduct_reason = "已应用后续扣重超带，再调整" if reopened else "扣重待确认"
         card = {
             **(existing or {}),
             **extra,

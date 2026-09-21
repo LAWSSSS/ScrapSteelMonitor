@@ -112,7 +112,7 @@ def _notice(day: str, summary: dict, pending_n: int) -> str:
     if ui.get("watching") and ui.get("last_error"):
         return f"扫描出错：{ui['last_error']}。监控仍开着，5 分钟后会再试。"
     if ui["mode"] == "choose":
-        return "先选一种工作方式：监控当天（先审）、监控当天-自动，或审核历史日。"
+        return "先选一种工作方式：监控当天（逐车确认）、监控当天-自动，或复核历史日。"
     if is_watch_mode(ui["mode"]):
         extra = ""
         if ui.get("next_scan_at"):
@@ -120,20 +120,20 @@ def _notice(day: str, summary: dict, pending_n: int) -> str:
         if ui.get("auto"):
             applied = int(ui.get("last_auto_applied") or 0)
             if ui.get("scanning"):
-                return f"正在扫今天 {ui['today']}，扫到待审会自动写库。"
+                return f"正在扫今天 {ui['today']}，扫到待确认结果会自动应用。"
             return (
                 f"自动模式：正在监控今天 {ui['today']}，每 {int(ui['interval_sec']) // 60} 分钟扫一次。"
-                f"{extra} 上次自动写库 {applied} 辆。点「监控当天」可改回先审。"
+                f"{extra} 上次自动应用 {applied} 辆。点「监控当天」可改回逐车确认。"
             )
         if ui.get("scanning"):
-            return f"正在扫今天 {ui['today']}，仍需你点批准才写库。"
+            return f"正在扫今天 {ui['today']}，仍需你逐车确认后应用。"
         return (
             f"正在监控今天 {ui['today']}，每 {int(ui['interval_sec']) // 60} 分钟扫一次。"
-            f"{extra} 待审 {pending_n}。点「监控当天-自动」可改为扫完就写库。"
+            f"{extra} 待确认 {pending_n}。点「监控当天-自动」可改为扫描后自动应用。"
         )
     if summary:
-        return f"{day} 已扫完，待审 {pending_n}。不会循环监控今天。"
-    return f"已切到审核历史日。选好日期后点「扫描该日」。当前看 {day or '未选日期'}。"
+        return f"{day} 已扫完，待确认 {pending_n}。不会循环监控今天。"
+    return f"已切到复核历史日。选好日期后点「扫描该日」。当前看 {day or '未选日期'}。"
 
 
 def overview(day: str) -> dict:

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>检判修正看板</title>
+  <title>盛隆检判结果复核</title>
   <style>
     :root {
       --bg: #f4f2ec;
@@ -79,23 +79,23 @@
 </head>
 <body>
   <main>
-    <h1>检判修正看板</h1>
+    <h1>盛隆检判结果复核</h1>
     <p class="sub">本机 127.0.0.1 · 启动后先选工作方式 · 监控当天和自动模式可随时切换 · 鼠标停住 30 秒后画轨迹防 VPN 掉线</p>
 
     <div class="modes">
       <button type="button" class="mode" id="modeWatch" onclick="chooseMode('watch-today')">
         <h3>监控当天</h3>
-        <p>盯今天的车次。1～3 条人工就能进待审（主料型须为重废1/2）。不一致时先选料型再批准。每 5 分钟再扫一次。</p>
+        <p>盯今天的车次。1～3 条人工就能进入待确认（主料型须为重废1/2）。不一致时先选料型再确认应用。每 5 分钟再扫一次。</p>
         <span class="badge" id="watchBadge">未开启</span>
       </button>
       <button type="button" class="mode" id="modeWatchAuto" onclick="chooseMode('watch-today-auto')">
         <h3>监控当天-自动</h3>
-        <p>同一套扫描。只有 2/3 人主料型一致且为重废1/2 才自动写库。1 人或需选料型的只显示，不自动写。</p>
+        <p>同一套扫描。只有 2/3 人主料型一致且为重废1/2 才自动应用。1 人或需选料型的只显示，不自动应用。</p>
         <span class="badge" id="watchAutoBadge">未开启</span>
       </button>
       <button type="button" class="mode" id="modeReview" onclick="chooseMode('review-history')">
-        <h3>审核历史日</h3>
-        <p>选过去某一天，扫一次再审。1～3 条人工都能进待审；不一致时先选重废1或2。不会循环改今天。</p>
+        <h3>复核历史日</h3>
+        <p>选过去某一天，扫描一次再确认。1～3 条人工都能进入待确认；不一致时先选重废1或2。不会循环调整今天。</p>
         <span class="badge" id="reviewBadge">未选择</span>
       </button>
     </div>
@@ -119,21 +119,21 @@
     </div>
     <div class="stats">
       <div class="stat"><b id="sBills">0</b><span>该日磅单</span></div>
-      <div class="stat warn"><b id="sPend">0</b><span>待你审核</span></div>
+      <div class="stat warn"><b id="sPend">0</b><span>待你确认</span></div>
       <div class="stat ok"><b id="sSkip">0</b><span>规则/带内跳过</span></div>
-      <div class="stat"><b id="sDone">0</b><span>已处理</span></div>
+      <div class="stat"><b id="sDone">0</b><span>已应用</span></div>
     </div>
     <div class="notice" id="notice">先选一种工作方式。不会自动改今天。</div>
     <p class="meta" id="alive"></p>
 
-    <h2>待审核 · 先看这一辆</h2>
+    <h2>待确认 · 先看这一辆</h2>
     <div class="pills" id="pills"></div>
-    <div class="card" id="detail">还没有待审车。</div>
+    <div class="card" id="detail">还没有待确认车辆。</div>
 
     <h2>该日全部车次</h2>
     <table>
       <thead>
-        <tr><th>车牌</th><th>类型</th><th>对比</th><th>差值</th><th>处理</th></tr>
+        <tr><th>车牌</th><th>类型</th><th>对比</th><th>差值</th><th>状态</th></tr>
       </thead>
       <tbody id="tbody"></tbody>
     </table>
@@ -277,7 +277,7 @@
       $("reviewActions").hidden = mode !== "review-history";
       if (isWatchMode(mode)) {
         $("watchDayLock").textContent = ui.auto
-          ? "业务日锁定 " + todayISO() + " · 自动写库"
+          ? "业务日锁定 " + todayISO() + " · 自动应用"
           : "业务日锁定 " + todayISO();
         $("scanWatchBtn").textContent = ui.scanning ? "正在扫描…" : "立即再扫一次";
         $("scanWatchBtn").disabled = !!ui.scanning;
@@ -303,14 +303,14 @@
         watch.className = "badge";
       }
       if (ui.watching && ui.auto) {
-        watchAuto.textContent = ui.scanning ? "自动写库 · 正在扫" : "自动写库中";
+        watchAuto.textContent = ui.scanning ? "自动应用 · 正在扫" : "自动应用中";
         watchAuto.className = "badge warn";
       } else {
         watchAuto.textContent = "未开启";
         watchAuto.className = "badge";
       }
       if (ui.mode === "review-history") {
-        review.textContent = "审核 " + (ui.date || currentDate());
+        review.textContent = "复核 " + (ui.date || currentDate());
         review.className = "badge live";
       } else {
         review.textContent = "未选择";
@@ -346,7 +346,7 @@
       if (!card) {
         box.textContent = state.ui && state.ui.mode === "choose"
           ? "先选工作方式。"
-          : "这一天没有待审车。";
+          : "这一天没有待确认车辆。";
       } else if (card.kind === "deduct") {
         box.innerHTML = renderDeductCard(card);
       } else {
@@ -358,9 +358,9 @@
         const inBand = !!card.in_band;
         const canApprove = !autoBlock && !inBand && card.target != null;
         const autoNote = autoBlock
-          ? "自动模式不写这张卡（1条人工或需选主料型）。请切回「监控当天」再批准。"
-          : (state.ui && state.ui.auto ? "当前是自动模式：2/3人一致的卡会自动写库。可点「监控当天」改回先审。" : "");
-        const approveLabel = inBand ? "已在带内" : "批准写库";
+          ? "自动模式不应用这张卡（1条人工或需选主料型）。请切回「监控当天」再确认。"
+          : (state.ui && state.ui.auto ? "当前是自动模式：2/3人一致的卡会自动应用。可点「监控当天」改回逐车确认。" : "");
+        const approveLabel = inBand ? "已在带内" : "确认并应用";
         box.innerHTML = `
           <div class="row" style="justify-content:space-between">
             <strong>${card.plate} · ${card.main_label}</strong>
@@ -370,8 +370,8 @@
           <div class="big">
             <div class="bad"><b>${card.compare_pct != null ? card.compare_pct : card.ai_pct}%</b><span class="meta">${card.is_mix ? "改前 AI（混料=库内）" : "改前展示（非混料已加幅）"}</span></div>
             <div><b>${card.ai_after != null ? card.ai_after + "%" : "—"}</b><span class="meta">改后目标 ${card.target != null ? card.target + "%" : "—"}</span></div>
-            <div><b>${card.volume_update_rows || 0}</b><span class="meta">将 UPDATE 体积行</span></div>
-            <div><b>${card.insert_rows || 0}</b><span class="meta">将 INSERT</span></div>
+            <div><b>${card.volume_update_rows || 0}</b><span class="meta">将调整明细行</span></div>
+            <div><b>${card.insert_rows || 0}</b><span class="meta">将新增明细行</span></div>
           </div>
           <p class="meta">${humanPctLine(card)} · 随机差 ${card.delta != null ? card.delta : "—"}</p>
           ${consensusLine(card) ? `<p class="meta">${consensusLine(card)}</p>` : ""}
@@ -387,7 +387,7 @@
           <p class="meta">${autoNote}</p>
           <div class="row" style="margin-top:12px">
             <button class="primary" ${canApprove ? "" : "disabled"} onclick="doApprove()">${approveLabel}</button>
-            <button onclick="doReject()">拒绝</button>
+            <button onclick="doReject()">暂不应用</button>
           </div>
         `;
       }
@@ -409,7 +409,7 @@
             <td>扣重</td>
             <td>${cmp}</td>
             <td>${raw.gap_kg != null ? raw.gap_kg + "kg" : "—"}</td>
-            <td>${raw.status === "pending" ? "扣重待审" : (raw.reason || raw.status)}</td>
+            <td>${raw.status === "pending" ? "扣重待确认" : (raw.reason || raw.status)}</td>
           </tr>`;
         }
         const card = pendingByBill[raw.weight_bill_no] || {};
@@ -434,7 +434,7 @@
           <td>${v.main_label || "料型"}</td>
           <td>${aiCell}</td>
           <td>${v.gap != null ? v.gap : "—"}</td>
-          <td>${v.status === "pending" ? ("料型待审" + ((manualsLabel(v) || manualsLabel(card)) ? " · " + (manualsLabel(v) || manualsLabel(card)) : "")) : displayReason(v)}</td>
+          <td>${v.status === "pending" ? ("料型待确认" + ((manualsLabel(v) || manualsLabel(card)) ? " · " + (manualsLabel(v) || manualsLabel(card)) : "")) : displayReason(v)}</td>
         </tr>`;
       }).join("");
 
@@ -537,7 +537,7 @@
     function renderDeductCard(card) {
       const last = card.last_target_kg != null
         ? `上次目标 ${card.last_target_kg}kg · 改前 ${card.ai_kg_before != null ? card.ai_kg_before : "—"}kg`
-        : "还没写过库，先填目标公斤数";
+        : "还没有应用过调整，先填目标公斤数";
       return `
         <div class="row" style="justify-content:space-between">
           <strong>${card.plate} · 扣重</strong>
@@ -550,19 +550,19 @@
           <div><b>${card.deduct_rows || 0}</b><span class="meta">有扣杂行</span></div>
         </div>
         <p class="meta">${humanTonLine(card)} · 净重 ${card.net_weight || "—"}kg</p>
-        <p class="meta">原始 ${card.original_kg != null ? card.original_kg : "—"}kg · base ${card.base_kg != null ? card.base_kg : "—"}kg · 预处理后 ${card.pre_kg != null ? card.pre_kg : "—"}kg${card.deduct_weight_rate != null ? " · 落库率 " + card.deduct_weight_rate + "（仅参考）" : ""}</p>
-        <p class="meta">${card.preprocess_op || "—"} · ${card.interval || ""}${card.random_missing ? " · 随机数未落库，暂用205" : ""}</p>
+        <p class="meta">原始 ${card.original_kg != null ? card.original_kg : "—"}kg · base ${card.base_kg != null ? card.base_kg : "—"}kg · 预处理后 ${card.pre_kg != null ? card.pre_kg : "—"}kg${card.deduct_weight_rate != null ? " · 参考扣重率 " + card.deduct_weight_rate : ""}</p>
+        <p class="meta">${card.preprocess_op || "—"} · ${card.interval || ""}${card.random_missing ? " · 随机数未记录，暂用205" : ""}</p>
         <p class="meta">${last}</p>
         <p class="meta">磅单 ${card.weight_bill_no}</p>
         <p class="meta"><code>${card.task_code || ""}</code></p>
         <p class="meta">时间窗 ${card.time_min || ""} — ${card.time_max || ""} · 该日行数 ${card.row_count || ""}</p>
-        <p class="meta">${card.reopen ? "这辆车扣重已经改过。后续人工又超 150kg，再改一次。" : "目标按核算扣杂填。写完会回读核算差；仍超 150 就按接近了多少再改一枪。"}</p>
+        <p class="meta">${card.reopen ? "这辆车扣重已经调整过。后续人工又超 150kg，再调整一次。" : "目标按核算扣杂填。应用后会重新核对差值；仍超 150 就按接近了多少再调整一次。"}</p>
         <div class="row" style="margin-top:12px">
           <label class="meta">目标 kg</label>
           <input id="deductTarget" type="number" min="0.01" step="0.01" placeholder="例如 380" style="width:120px" />
-          <button class="primary" onclick="doApproveDeduct()">确认写库</button>
+          <button class="primary" onclick="doApproveDeduct()">确认并应用</button>
           <button onclick="doRefreshDeduct()">再查一次</button>
-          <button onclick="doReject()">拒绝${card.written ? "并回滚" : ""}</button>
+          <button onclick="doReject()">${card.written ? "恢复原结果" : "暂不应用"}</button>
         </div>
       `;
     }
@@ -584,8 +584,8 @@
       if (busy) return;
       busy = true;
       $("notice").textContent = mode === "watch-today-auto"
-        ? "正在打开自动模式：扫到待审会写库…"
-        : (mode === "watch-today" ? "正在打开当天监控并扫描今天…" : "已切到审核历史日。");
+        ? "正在打开自动模式：扫到待确认结果会自动应用…"
+        : (mode === "watch-today" ? "正在打开当天监控并扫描今天…" : "已切到复核历史日。");
       try {
         const body = { mode };
         if (mode === "review-history") {
@@ -657,14 +657,14 @@
       if (!card) return;
       if (card.kind === "deduct") return doApproveDeduct();
       if (state.ui && state.ui.auto && card.auto_ok === false) {
-        alert("自动模式不写这张卡。请切回「监控当天」再批准。");
+        alert("自动模式不应用这张卡。请切回「监控当天」再确认。");
         return;
       }
       if (card.in_band) {
-        alert("该料型已在±10%带内，不能批准。");
+        alert("该料型已在±10%带内，无需再次应用。");
         return;
       }
-      if (!confirm("确认把 " + card.plate + " 写入数据库？")) return;
+      if (!confirm("确认采用 " + card.plate + " 的检判修正结果？\n\n确认后将更新业务系统中的检判结果。")) return;
       try {
         await api("/api/approve", {
           method: "POST",
@@ -684,7 +684,7 @@
         alert("请先填写目标扣杂公斤数");
         return;
       }
-      if (!confirm("确认把 " + card.plate + " 的扣杂缩放到 " + target + "kg？")) return;
+      if (!confirm("确认把 " + card.plate + " 的扣杂调整到 " + target + "kg 并应用？\n\n确认后将更新业务系统中的检判结果。")) return;
       try {
         const data = await api("/api/approve-deduct", {
           method: "POST",
@@ -698,7 +698,7 @@
         if (data.after) {
           $("notice").textContent = data.in_band
             ? (card.plate + " 扣重已进入150kg内，估算 " + data.after.ai_kg + "kg")
-            : (card.plate + " 已写库，估算 " + data.after.ai_kg + "kg，还差 " + data.after.gap_kg + "kg，可再改");
+            : (card.plate + " 已应用，估算 " + data.after.ai_kg + "kg，还差 " + data.after.gap_kg + "kg，可继续调整");
         }
         await refresh();
       } catch (e) { alert(e.message); }
