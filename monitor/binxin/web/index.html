@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>镔鑫检判修正看板</title>
+  <title>镔鑫检判结果复核</title>
   <style>
     :root {
       --bg: #f4f2ec;
@@ -75,8 +75,8 @@
 </head>
 <body>
   <main>
-    <h1>镔鑫检判修正看板</h1>
-    <p class="sub">本机 127.0.0.1 · 两条标准各自独立，任一不合格就进待审</p>
+    <h1>镔鑫检判结果复核</h1>
+    <p class="sub">本机 127.0.0.1 · 两条标准各自独立，任一不合格就进入待确认</p>
     <p class="sub">
       占比：差异率 = |人工主料型占比 − AI主料型展示占比| ÷ 人工主料型占比，主料型不一致记 100%，超 10% 算不合格。<br />
       扣重：|AI最终扣重 − 人工扣杂| ≤ 100kg，就这一条。AI 最终扣重 = 原始扣杂 + 主料型附加常数（+气割渣、天气扣重）。
@@ -94,13 +94,13 @@
     <div class="stats">
       <div class="stat"><b id="sTotal">—</b><span>当日车次</span></div>
       <div class="stat ok"><b id="sOk">—</b><span>占比在带内</span></div>
-      <div class="stat warn"><b id="sTodo">—</b><span>占比待修正</span></div>
+      <div class="stat warn"><b id="sTodo">—</b><span>占比待确认</span></div>
       <div class="stat ok"><b id="sDedOk">—</b><span>扣重合格</span></div>
-      <div class="stat warn"><b id="sDedTodo">—</b><span>扣重待修正</span></div>
-      <div class="stat"><b id="sDone">—</b><span>已落库</span></div>
+      <div class="stat warn"><b id="sDedTodo">—</b><span>扣重待确认</span></div>
+      <div class="stat"><b id="sDone">—</b><span>已应用</span></div>
     </div>
 
-    <div class="notice" id="notice">先选业务日，再点「扫描该日」。扫描只读库，不会改任何数据。</div>
+    <div class="notice" id="notice">先选业务日，再点「扫描该日」。扫描只核对，不会应用任何调整。</div>
 
     <h2>车次</h2>
     <div class="tablewrap">
@@ -127,6 +127,13 @@
 const $ = (id) => document.getElementById(id);
 let DATA = { vehicles: [], pending: {}, processed: {} };
 let OPEN = null;
+const EVENT_LABELS = {
+  scanned: "已扫描",
+  approved: "已应用",
+  approved_but_off_band: "已应用但仍不合格",
+  rejected: "暂不应用",
+  restored: "已恢复原结果",
+};
 
 function fmtPct(v) {
   return (v === null || v === undefined || v === "") ? "—" : Number(v).toFixed(2) + "%";
@@ -214,14 +221,14 @@ function deductBlock(v) {
     ? '<div class="log">AI 最终扣重≈主料型常数（原始扣杂天然只有几 kg），人工离常数超过'
       + ' 100kg 时调不进合格区间。这是规则覆盖不到的车，不是算错。</div>'
     : "";
-  // 已落库的车不再显示"目标"和"必须一起改"这类待办口吻的行——那些讲的是改之前的打算。
+  // 已应用的车不再显示"目标"和"必须一起改"这类待办口吻的行——那些讲的是改之前的打算。
   const p = v.deduct_plan;
   let planRows;
   if (written) {
-    planRows = `<dt>扣重</dt><dd>已落库，上面的数字是写完从库里回读出来的</dd>`;
+    planRows = `<dt>扣重</dt><dd>已应用，上面的数字已经从业务系统重新核对</dd>`;
   } else if (p) {
     planRows = `<dt>扣重修正目标</dt><dd>原始扣杂 ${fmtKg(p.current_raw_kg, 2)} → ${fmtKg(p.target_raw_kg, 1)}`
-      + `（写库 ${p.target_raw_tons} 吨），修正扣杂 ${fmtKg(p.target_modified_kg, 2)}，`
+      + `（应用值 ${p.target_raw_tons} 吨），修正扣杂 ${fmtKg(p.target_modified_kg, 2)}，`
       + `最终扣重约 ${fmtKg(p.target_final_kg, 2)}</dd>`;
   } else {
     planRows = v.deduct_skip
@@ -241,18 +248,18 @@ function deductBlock(v) {
 function actionsBlock(v) {
   const card = DATA.pending[v.flow_code];
   const why = card
-    ? "本次会改：" + (card.kind || "占比") + "。点批准会真正写库，写前自动存快照和回滚脚本。"
-    : "这辆车不在待审队列里，先扫描该日。";
+    ? "本次会调整：" + (card.kind || "占比") + "。确认后会更新业务系统结果；应用前自动保留原始记录，支持恢复。"
+    : "这辆车不在待确认队列里，先扫描该日。";
   return `<div class="row" style="margin-top:12px">
       <button class="primary" ${card ? "" : "disabled"}
-        onclick="approve('${v.flow_code}')">批准并落库</button>
+        onclick="approve('${v.flow_code}')">确认并应用</button>
       <button class="ghost" ${card ? "" : "disabled"}
-        onclick="reject('${v.flow_code}')">退回</button>
+        onclick="reject('${v.flow_code}')">暂不应用</button>
       <span class="log">${why}</span>
     </div>`;
 }
 
-// 状态判定只写一份，标签和上方计数共用，免得落库后两处对不上。
+// 状态判定只写一份，标签和上方计数共用，免得应用后两处对不上。
 function pctState(v) {
   if (DATA.processed[v.flow_code]) return "done";
   if (v.ok) return "ok";
@@ -270,15 +277,15 @@ function dedState(v) {
 
 function statusTag(v) {
   switch (pctState(v)) {
-    case "done": return '<span class="tag done">已落库</span>';
+    case "done": return '<span class="tag done">已应用</span>';
     case "ok": return '<span class="tag ok">在带内</span>';
-    case "todo": return '<span class="tag todo">待修正</span>';
+    case "todo": return '<span class="tag todo">待确认</span>';
     default: return `<span class="tag skip">${v.skip_reason || "未分类"}</span>`;
   }
 }
 
-// 落库之后，扫描时抓的那份扣重就过期了（页面会一直显示改之前的值，要重扫才对）。
-// processed 里存的是写完从库里回读出来的真值，形状和扫描时一致，整块盖上去即可。
+// 应用之后，扫描时抓的那份扣重就过期了（页面会一直显示调整前的值，要重扫才对）。
+// processed 里存的是应用后从业务系统重新读取的真值，形状和扫描时一致，整块盖上去即可。
 function effDeduct(v) {
   const done = DATA.processed[v.flow_code];
   return (done && done.deduct) || v.deduct;
@@ -292,18 +299,18 @@ function isWritten(v) {
 function deductTag(v) {
   switch (dedState(v)) {
     case "none": return '<span class="tag skip">未查扣重</span>';
-    case "done": return '<span class="tag done">已落库</span>';
-    case "badwrite": return '<span class="tag skip">已落库但仍不合格</span>';
+    case "done": return '<span class="tag done">已应用</span>';
+    case "badwrite": return '<span class="tag skip">已应用但仍不合格</span>';
     case "todo": return v.deduct_rewrite
       ? '<span class="tag todo">随主料型重算</span>'
-      : '<span class="tag todo">待修正</span>';
+      : '<span class="tag todo">待确认</span>';
     case "ok": return '<span class="tag ok">合格</span>';
     default: return `<span class="tag skip">${v.deduct_skip || "不合格"}</span>`;
   }
 }
 
 function render() {
-  // 计数按当前状态现算，不用扫描时冻结的 counts —— 否则落库之后要重扫才会变。
+  // 计数按当前状态现算，不用扫描时冻结的 counts —— 否则应用之后要重扫才会变。
   const all = DATA.vehicles || [];
   const tally = (fn, ...want) => all.filter((v) => want.includes(fn(v))).length;
   $("sTotal").textContent = DATA.total ?? "—";
@@ -350,7 +357,7 @@ function render() {
     }).join("");
   }
   $("logs").innerHTML = (DATA.logs || []).slice().reverse().map((l) =>
-    `<div>${l.ts} · ${l.event} · ${l.car_number || l.biz_date || ""}</div>`
+    `<div>${l.ts} · ${EVENT_LABELS[l.event] || l.event} · ${l.car_number || l.biz_date || ""}</div>`
   ).join("") || "—";
 }
 
@@ -382,15 +389,15 @@ async function scan() {
 async function approve(flow) {
   const v = (DATA.vehicles || []).find((x) => x.flow_code === flow);
   const name = v ? v.car_number : flow;
-  if (!confirm(`确认把 ${name} 的检判结果写进镔鑫库？\n\n写前会自动存快照和回滚脚本。`)) return;
+  if (!confirm(`确认采用 ${name} 的检判修正结果？\n\n确认后将更新业务系统中的检判结果；应用前会自动保留原始记录，支持恢复。`)) return;
   showErr("");
   try {
     const res = await api("/api/approve", { flow: flow, date: $("day").value });
     await load();
     const tail = res.in_band
-      ? "回读已在带内。"
-      : "注意：回读仍不在带内，回滚脚本 " + (res.backup || {}).rollback;
-    alert(`${name} 已落库：改 ${res.updated_rows} 行、新增 ${res.inserted_rows} 行。${tail}`);
+      ? "重新核对后已在带内。"
+      : "注意：重新核对后仍不在带内。恢复文件：" + (res.backup || {}).rollback;
+    alert(`${name} 已应用：调整 ${res.updated_rows} 行、新增 ${res.inserted_rows} 行。${tail}`);
   } catch (e) { showErr(String(e.message || e)); }
 }
 

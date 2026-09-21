@@ -411,12 +411,12 @@ def pending_card(vehicle: Vehicle, day: date) -> dict[str, Any]:
     时按它决定改哪些表。
     """
     if vehicle.plan is None and vehicle.deduct_plan is None:
-        raise ValueError(f"{vehicle.car_number} 没有方案，不能进待审")
+        raise ValueError(f"{vehicle.car_number} 没有方案，不能进入待确认")
     # 扣重常数按改完之后的主料型取，所以 target_key 一律记 effective_main：占比要改时是人工
     # 的主料型，只改扣重时就是当前 AI 的主料型（这时它和人工一致，否则占比也会要改）。
     main = vehicle.effective_main
     if main is None:
-        raise ValueError(f"{vehicle.car_number} 没有主料型，不能进待审")
+        raise ValueError(f"{vehicle.car_number} 没有主料型，不能进入待确认")
     return {
         **vehicle.as_card(),
         "biz_date": day.isoformat(),
@@ -477,12 +477,12 @@ def queue_day(day: date) -> dict[str, Any]:
 
 def summarize(vehicles: list[Vehicle]) -> dict[str, int]:
     """按结论计数，顺序固定，方便看板和日志对比。"""
-    counts: dict[str, int] = {"在带内": 0, "待修正": 0}
+    counts: dict[str, int] = {"在带内": 0, "待确认": 0}
     for vehicle in vehicles:
         if vehicle.ok:
             counts["在带内"] += 1
         elif vehicle.plan is not None:
-            counts["待修正"] += 1
+            counts["待确认"] += 1
             counts[vehicle.plan.method] = counts.get(vehicle.plan.method, 0) + 1
         else:
             reason = vehicle.skip_reason or "未分类"
@@ -492,14 +492,14 @@ def summarize(vehicles: list[Vehicle]) -> dict[str, int]:
 
 def summarize_deduct(vehicles: list[Vehicle]) -> dict[str, int]:
     """扣重单独计数。一辆车占比和扣重可以一个合格一个不合格，两条线互不替代。"""
-    counts: dict[str, int] = {"扣重合格": 0, "扣重待修正": 0, "扣重需随主料型重算": 0}
+    counts: dict[str, int] = {"扣重合格": 0, "扣重待确认": 0, "扣重需随主料型重算": 0}
     for vehicle in vehicles:
         if vehicle.deduct is None:
             continue
         if vehicle.deduct_rewrite:
             counts["扣重需随主料型重算"] += 1
         if vehicle.deduct_plan is not None:
-            counts["扣重待修正"] += 1
+            counts["扣重待确认"] += 1
         elif vehicle.deduct.ok:
             counts["扣重合格"] += 1
         else:

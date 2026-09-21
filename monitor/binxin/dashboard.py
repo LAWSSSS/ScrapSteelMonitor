@@ -1,8 +1,8 @@
-"""镔鑫审核看板。只绑 127.0.0.1。
+"""镔鑫检判结果复核看板。只绑 127.0.0.1。
 
-只有 /api/approve 一条路径会写库。扫描、刷新、退回都不碰库里的检判结果（退回只删本机待审
-文件）。落库的把关是人在页面上逐车看过后点批准，页面会再弹一次确认；写之前自动存快照和
-回滚脚本，批错了能还回去。
+只有 /api/approve 一条路径会更新业务系统。扫描、刷新、暂不应用都不碰业务系统里的检判结果
+（暂不应用只删本机待确认文件）。应用的把关是人在页面上逐车看过后点确认，页面会再弹一次
+确认；应用之前自动保留原始记录，选错了能恢复。
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from monitor.config import parse_day, today_cn
 logger = logging.getLogger(__name__)
 WEB = Path(__file__).resolve().parent / "web" / "index.html"
 
-#: 看板固定本机。绑到别的地址等于把写库入口暴露到网上。
+#: 看板固定本机。绑到别的地址等于把结果应用入口暴露到网上。
 HOST = "127.0.0.1"
 PORT = 8788
 
@@ -49,12 +49,12 @@ def overview(day: str) -> dict:
     vehicles = summary.get("vehicles") or []
     if summary:
         notice = (
-            f"{day} 扫过 {summary.get('total', 0)} 车，待审 {len(pending)}，"
-            f"已落库 {len(done)}。占比差异率超 {DIFF_RATE_LIMIT_PCT:.0f}%、"
-            f"或扣重与人工差超 ±{DED_DIFF_LIMIT_KG:.0f}kg 的才进待审。"
+            f"{day} 扫过 {summary.get('total', 0)} 车，待确认 {len(pending)}，"
+            f"已应用 {len(done)}。占比差异率超 {DIFF_RATE_LIMIT_PCT:.0f}%、"
+            f"或扣重与人工差超 ±{DED_DIFF_LIMIT_KG:.0f}kg 的才进入待确认。"
         )
     else:
-        notice = f"{day} 还没扫过。点「扫描该日」。扫描只读库。"
+        notice = f"{day} 还没扫过。点「扫描该日」。扫描只核对，不会应用任何调整。"
     return {
         "date": day,
         "total": summary.get("total", 0),
@@ -132,13 +132,13 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    parser = argparse.ArgumentParser(description="镔鑫审核看板")
+    parser = argparse.ArgumentParser(description="镔鑫检判结果复核看板")
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
     httpd = ThreadingHTTPServer((HOST, args.port), Handler)
     url = f"http://{HOST}:{args.port}/"
-    logger.info("镔鑫看板 %s（点批准即落库，写前自动存快照和回滚脚本）", url)
+    logger.info("镔鑫看板 %s（确认后应用结果；应用前自动保留原始记录，支持恢复）", url)
     if not args.no_browser:
         webbrowser.open(url)
     httpd.serve_forever()

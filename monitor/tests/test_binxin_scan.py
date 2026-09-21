@@ -253,7 +253,7 @@ class SummarizeTests(unittest.TestCase):
         skipped = judge(CAR, [], [], grabs=0)
         counts = summarize([ok, todo, skipped])
         self.assertEqual(counts["在带内"], 1)
-        self.assertEqual(counts["待修正"], 1)
+        self.assertEqual(counts["待确认"], 1)
         self.assertEqual(counts[PLAN_SCALE], 1)
         self.assertEqual(counts[SKIP_NO_AI], 1)
 

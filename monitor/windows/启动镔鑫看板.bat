@@ -15,7 +15,7 @@ if not exist "monitor\.env" (
 
 echo 镔鑫看板 http://127.0.0.1:8788
 echo 盛隆看板在 8765，两个端口不冲突，可以同时开两个窗口。
-echo 要连上公司 VPN。点批准即落库，写前自动存快照和回滚脚本。
+echo 要连上公司 VPN。确认后应用结果；应用前自动保留原始记录，支持恢复。
 echo.
 ".venv\Scripts\python.exe" -m monitor.binxin.dashboard %*
 if errorlevel 1 (

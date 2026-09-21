@@ -116,7 +116,7 @@ def build_restore_statements(
     stmts += _stat_statements(flow, snapshot.get("stat_rows") or [])
     stmts += _deduct_statements(flow, snapshot.get("deduct_row"))
     if not stmts:
-        raise RuntimeError("快照里没有可回滚的内容")
+        raise RuntimeError("原始记录里没有可恢复的内容")
     return stmts
 
 
@@ -161,7 +161,7 @@ def _insert_ids_of(flow_code: str, day: str) -> list[int]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="镔鑫回滚一辆车")
+    parser = argparse.ArgumentParser(description="镔鑫恢复一辆车的原结果")
     parser.add_argument("--flow", required=True, help="flow_code")
     parser.add_argument("--date", required=True, help="业务日 YYYY-MM-DD")
     parser.add_argument("--file", default="", help="指定快照文件，默认取最近一次")
@@ -169,7 +169,7 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     result = restore(args.flow, args.date, file=args.file)
     print(
-        f"已回滚 {result['check_rows']} 行逐抓斗、{result['stat_rows']} 行汇总，"
+        f"已恢复 {result['check_rows']} 行逐抓斗、{result['stat_rows']} 行汇总，"
         f"作废新增 {len(result['voided_inserts'])} 行"
         + ("，扣重已复原" if result["deduct_restored"] else "，快照里没有扣重")
     )

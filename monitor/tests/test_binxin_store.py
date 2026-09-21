@@ -224,7 +224,7 @@ class QueueTests(StoreTestCase):
         self._run([_vehicle("苏A1", "f1", with_plan=True)])
         saved = store.load_scan_summary(DAY)
         self.assertEqual(saved["total"], 1)
-        self.assertEqual(saved["counts"]["待修正"], 1)
+        self.assertEqual(saved["counts"]["待确认"], 1)
 
     def test_card_is_json_round_trippable(self) -> None:
         """待审单要能原样落盘再读回来，target_key 不能是元组。"""
@@ -249,7 +249,7 @@ class OverviewTests(StoreTestCase):
             scan.queue_day(date(2026, 9, 19))
         data = dashboard.overview(DAY)
         self.assertIn("f1", data["pending"])
-        self.assertEqual(data["counts"]["待修正"], 1)
+        self.assertEqual(data["counts"]["待确认"], 1)
 
     def test_processed_only_counts_that_day(self) -> None:
         store.mark_processed("f1", DAY, {})

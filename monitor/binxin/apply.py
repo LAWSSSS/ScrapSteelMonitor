@@ -86,7 +86,7 @@ class ApproveRefused(RuntimeError):
 def _key_of(card_key: Any) -> Key:
     pair = tuple(int(x) for x in card_key)
     if len(pair) != 2:
-        raise ApproveRefused(f"待审单里的料型 {card_key!r} 不合法")
+        raise ApproveRefused(f"待确认记录里的料型 {card_key!r} 不合法")
     return (pair[0], pair[1])
 
 
@@ -259,7 +259,7 @@ def replan_live(card: dict[str, Any]) -> dict[str, Any]:
         if live_main != target_key:
             raise ApproveRefused(
                 f"人工主料型已变成 {label(live_main) if live_main else '空'}，"
-                f"与待审单的 {label(target_key)} 不符，已中止"
+                f"与待确认记录的 {label(target_key)} 不符，已中止"
             )
         human_pct = human_pcts[target_key]
     if human_pct <= 0.0:
@@ -381,7 +381,7 @@ def approve(flow_code: str, day: str) -> dict[str, Any]:
     """
     card = load_pending(flow_code, day)
     if card is None:
-        raise FileNotFoundError(f"没有待审单 {flow_code} {day}")
+        raise FileNotFoundError(f"没有待确认记录 {flow_code} {day}")
     live = replan_live(card)
     plan: GrabPlan | None = live["plan"]
     target_key = _key_of(card["target_key"])
@@ -453,7 +453,7 @@ def approve(flow_code: str, day: str) -> dict[str, Any]:
     if not after["in_band"]:
         # 只改扣重的单本来就不该动占比，这里不在带内说明库里的占比在批准期间被人改过。
         logger.error(
-            "%s 写完回读仍不在带内：展示 %.2f%% vs 人工 %.2f%%。回滚脚本 %s",
+            "%s 应用后重新核对仍不在带内：展示 %.2f%% vs 人工 %.2f%%。恢复文件 %s",
             card.get("car_number"),
             after["display_pct"],
             live["human_pct"],
@@ -463,7 +463,7 @@ def approve(flow_code: str, day: str) -> dict[str, Any]:
     if ded and not ded.get("follows_rule", True):
         # 页面上 原始扣杂 + 常数 应该等于 修正扣杂。这条破了比扣重不合格更容易被发现。
         logger.error(
-            "%s 写完回读：修正扣杂 %s ≠ 原始 %s + 常数 %s。回滚脚本 %s",
+            "%s 应用后重新核对：修正扣杂 %s ≠ 原始 %s + 常数 %s。恢复文件 %s",
             card.get("car_number"),
             ded.get("modified_kg"),
             ded.get("raw_kg"),
@@ -540,7 +540,7 @@ def reject(flow_code: str, day: str) -> dict[str, Any]:
     """退回待审单。不碰库。"""
     card = load_pending(flow_code, day)
     if card is None:
-        raise FileNotFoundError(f"没有待审单 {flow_code} {day}")
+        raise FileNotFoundError(f"没有待确认记录 {flow_code} {day}")
     remove_pending(flow_code, day)
     unmark_processed(flow_code, day)
     append_log(
