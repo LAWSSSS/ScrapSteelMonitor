@@ -151,6 +151,22 @@
       11: "中废", 12: "生铁", 13: "厚剪",
       14: "钢筋切粒", 15: "汽车壳", 16: "超标"
     };
+    const EVENT_LABELS = {
+      pending: "待确认",
+      approved: "已应用",
+      rejected: "暂不应用",
+      auto_approved: "已自动应用",
+      auto_approve_error: "自动应用失败",
+      skip: "已跳过",
+      deduct_skip: "扣重已跳过",
+      deduct_pending: "扣重待确认",
+      deduct_approved: "扣重已应用",
+      deduct_rejected: "扣重暂不应用",
+      restored: "已恢复原结果",
+      deduct_restored: "扣重已恢复原结果",
+      dump: "已备份",
+      mouse_keepalive_error: "VPN保活异常",
+    };
 
     function steelLabel(code) {
       if (code == null || code === "") return "";
@@ -158,8 +174,25 @@
       return names[code] || names[String(code)] || names[Number(code)] || ("料型" + code);
     }
 
+    function businessCopy(value) {
+      const replacements = [
+        ["已处理后续扣重超带，再改", "已应用后续扣重超带，再调整"],
+        ["已处理后续超带，再改", "已应用后续超带，再调整"],
+        ["该磅单+日期扣重已处理", "该磅单+日期扣重已应用"],
+        ["该磅单+日期已处理", "该磅单+日期已应用"],
+        ["带内误重开，已收回已处理标记", "带内误重开，已收回已应用标记"],
+        ["1条人工，自动不写", "1条人工，不自动应用"],
+        ["已在待审", "已在待确认"],
+        ["扣重待审", "扣重待确认"],
+      ];
+      return replacements.reduce(
+        (text, [before, after]) => text.split(before).join(after),
+        String(value || "")
+      );
+    }
+
     function displayReason(raw) {
-      const reason = raw.reason || raw.status || "";
+      const reason = businessCopy(raw.reason || raw.status || "");
       const steelType = raw.main_type != null
         ? raw.main_type
         : (raw.human1 && raw.human1.steel_type);
@@ -409,7 +442,7 @@
             <td>扣重</td>
             <td>${cmp}</td>
             <td>${raw.gap_kg != null ? raw.gap_kg + "kg" : "—"}</td>
-            <td>${raw.status === "pending" ? "扣重待确认" : (raw.reason || raw.status)}</td>
+            <td>${raw.status === "pending" ? "扣重待确认" : businessCopy(raw.reason || raw.status)}</td>
           </tr>`;
         }
         const card = pendingByBill[raw.weight_bill_no] || {};
@@ -439,7 +472,7 @@
       }).join("");
 
       $("logs").innerHTML = (state.logs || []).slice().reverse().slice(0, 12)
-        .map((l) => `${l.ts || ""} ${l.event} ${l.plate || l.weight_bill_no || ""} ${l.reason || ""}`)
+        .map((l) => `${l.ts || ""} ${EVENT_LABELS[l.event] || l.event} ${l.plate || l.weight_bill_no || ""} ${businessCopy(l.reason || "")}`)
         .join("<br>");
     }
 
