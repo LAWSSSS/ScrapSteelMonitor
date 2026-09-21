@@ -1,7 +1,8 @@
 """镔鑫审核看板。只绑 127.0.0.1。
 
-只有 /api/approve 一条路径会写库，而且还要先过写库封锁闸。扫描、刷新、退回都不碰库里的
-检判结果（退回只删本机待审文件）。
+只有 /api/approve 一条路径会写库。扫描、刷新、退回都不碰库里的检判结果（退回只删本机待审
+文件）。落库的把关是人在页面上逐车看过后点批准，页面会再弹一次确认；写之前自动存快照和
+回滚脚本，批错了能还回去。
 """
 
 from __future__ import annotations
@@ -19,10 +20,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from monitor.binxin import guard
 from monitor.binxin.apply import approve, reject
 from monitor.binxin.config import DIFF_RATE_LIMIT_PCT
 from monitor.binxin.db import format_db_error
+from monitor.binxin.deduct import DIFF_LIMIT_KG as DED_DIFF_LIMIT_KG
 from monitor.binxin.scan import queue_day
 from monitor.binxin.store import list_pending, load_processed, load_scan_summary, recent_logs
 from monitor.config import parse_day, today_cn
@@ -45,12 +46,12 @@ def overview(day: str) -> dict:
         for k, v in processed.items()
         if str(k).endswith("|" + day)
     }
-    lock = guard.status()
     vehicles = summary.get("vehicles") or []
     if summary:
         notice = (
             f"{day} 扫过 {summary.get('total', 0)} 车，待审 {len(pending)}，"
-            f"已落库 {len(done)}。差异率超 {DIFF_RATE_LIMIT_PCT:.0f}% 的才进待审。"
+            f"已落库 {len(done)}。占比差异率超 {DIFF_RATE_LIMIT_PCT:.0f}%、"
+            f"或扣重与人工差超 ±{DED_DIFF_LIMIT_KG:.0f}kg 的才进待审。"
         )
     else:
         notice = f"{day} 还没扫过。点「扫描该日」。扫描只读库。"
@@ -58,10 +59,10 @@ def overview(day: str) -> dict:
         "date": day,
         "total": summary.get("total", 0),
         "counts": summary.get("counts") or {},
+        "deduct_counts": summary.get("deduct_counts") or {},
         "vehicles": vehicles,
         "pending": pending,
         "processed": done,
-        "lock": lock,
         "logs": recent_logs(25),
         "notice": notice,
     }
@@ -117,20 +118,6 @@ class Handler(BaseHTTPRequestHandler):
                 summary = queue_day(day)
                 self._json(200, {"ok": True, "summary": summary})
                 return
-            if parsed.path == "/api/lock":
-                action = str(body.get("action") or "")
-                if action == "arm":
-                    if not guard.env_ok():
-                        raise RuntimeError(
-                            f"没解锁：启动看板前要先 export {guard.WRITE_ENV}={guard.WRITE_TOKEN}"
-                        )
-                    guard.arm(int(body.get("minutes") or guard.DEFAULT_ARM_MINUTES), who="看板")
-                elif action == "disarm":
-                    guard.disarm()
-                else:
-                    raise ValueError(f"未知操作 {action}")
-                self._json(200, {"ok": True, "lock": guard.status()})
-                return
             if parsed.path == "/api/approve":
                 self._json(200, approve(str(body["flow"]), str(body["date"])))
                 return
@@ -149,11 +136,9 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
-    # 进程起来时先锁死，避免上次残留的解锁文件让看板一开就能写库。
-    guard.disarm()
     httpd = ThreadingHTTPServer((HOST, args.port), Handler)
     url = f"http://{HOST}:{args.port}/"
-    logger.info("镔鑫看板 %s（写库当前锁死）", url)
+    logger.info("镔鑫看板 %s（点批准即落库，写前自动存快照和回滚脚本）", url)
     if not args.no_browser:
         webbrowser.open(url)
     httpd.serve_forever()

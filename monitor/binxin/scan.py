@@ -17,7 +17,8 @@ from datetime import date, datetime
 from typing import Any, Iterable
 
 from monitor.binxin import db, store
-from monitor.binxin.config import MIN_GRABS_TO_CORRECT
+from monitor.binxin.config import CHECKS_DEDUCT, MIN_GRABS_TO_CORRECT
+from monitor.binxin.deduct import Deduct, DeductPlan, decide, deduct_key
 from monitor.binxin.materials import Key, canonical, from_manual, is_graded, label, priority_rank
 from monitor.binxin.rate import (
     band_window,
@@ -30,6 +31,7 @@ from monitor.binxin.rate import (
     main_key,
     normalize,
     pick_raw_target,
+    seeded_rng,
 )
 from monitor.config import TZ
 
@@ -43,10 +45,16 @@ SKIP_AI_OUT_OF_SCOPE = "AI主料型不在判定范围"
 SKIP_UNREACHABLE = "人工占比落在展示空洞"
 SKIP_LEAD_CONFLICT = "进带与保持主料型冲突"
 SKIP_TOO_FEW_GRABS = "抓斗太少不便修正"
+SKIP_DEDUCT_BLOCKS_PCT = "改主料型会让扣重常数对不上"
 
 #: 修正方式。
 PLAN_SCALE = "其余料型等比缩放"
 PLAN_RESHAPE = "需摊平其余料型"
+
+#: 待审单要改哪几条线。占比和扣重各有独立的合格标准，可以单独成单。
+KIND_BOTH = "占比+扣重"
+KIND_PCT = "占比"
+KIND_DEDUCT = "扣重"
 
 
 def _round(value: float | None, digits: int = 2) -> float | None:
@@ -75,6 +83,26 @@ class Vehicle:
     ok: bool = False
     skip_reason: str = ""
     plan: "Plan | None" = None
+    deduct: Deduct | None = None
+    deduct_plan: DeductPlan | None = None
+    deduct_skip: str = ""
+    deduct_rewrite: bool = False
+
+    @property
+    def effective_main(self) -> Key | None:
+        """占比改完之后这车的主料型。扣重常数要按这个取，不是按当前的 ai_main。"""
+        return self.plan.target_key if self.plan is not None else self.ai_main
+
+    @property
+    def plan_kind(self) -> str:
+        """这车要改哪几条线。两条都没有方案时是空串。"""
+        if self.plan is not None and self.deduct_plan is not None:
+            return KIND_BOTH
+        if self.plan is not None:
+            return KIND_PCT
+        if self.deduct_plan is not None:
+            return KIND_DEDUCT
+        return ""
 
     def as_card(self) -> dict[str, Any]:
         """看板用的扁平结构。"""
@@ -97,11 +125,16 @@ class Vehicle:
             ),
             "diff_rate_pct": _round(self.diff_rate_pct, 1),
             "ok": self.ok,
+            "kind": self.plan_kind,
             "skip_reason": self.skip_reason,
             "human_pcts": {label(k): round(v, 2) for k, v in self.human_pcts.items()},
             "ai_raw_pcts": {label(k): round(v, 2) for k, v in self.ai_raw_pcts.items()},
             "ai_display_pcts": {label(k): round(v, 2) for k, v in self.ai_display_pcts.items()},
             "plan": self.plan.as_card() if self.plan else None,
+            "deduct": self.deduct.as_card() if self.deduct else None,
+            "deduct_plan": self.deduct_plan.as_card() if self.deduct_plan else None,
+            "deduct_skip": self.deduct_skip,
+            "deduct_rewrite": self.deduct_rewrite,
         }
 
 
@@ -230,22 +263,98 @@ def judge(
         vehicle.skip_reason = SKIP_TOO_FEW_GRABS
         return vehicle
 
-    vehicle.plan = plan_correction(vehicle.ai_raw_pcts, vehicle.human_main, human_pct)
+    vehicle.plan = plan_correction(
+        vehicle.ai_raw_pcts, vehicle.human_main, human_pct, seed=vehicle.flow_code
+    )
     if vehicle.plan is None:
         vehicle.skip_reason = SKIP_LEAD_CONFLICT
     return vehicle
+
+
+def _observe_deduct(
+    vehicle: Vehicle,
+    deduct_row: dict[str, Any] | None,
+    manual_row: dict[str, Any] | None,
+    stat_rows: list[dict[str, Any]],
+    main: Key | None,
+) -> Deduct:
+    """把库里的扣重字段装成 Deduct。附加常数按传进来的 main 取。"""
+    return Deduct(
+        raw_kg=float((deduct_row or {}).get("deduct_weight") or 0.0) * 1000.0,
+        modified_kg=_opt_float((deduct_row or {}).get("modified_deduct_weight")),
+        calculated_kg=_opt_float((deduct_row or {}).get("calculated_deduct_weight")),
+        final_kg=_opt_float((deduct_row or {}).get("final_deduct")),
+        qigezha_kg=float((deduct_row or {}).get("qigezha_hanzha_weight") or 0.0),
+        weather_kg=float((deduct_row or {}).get("weather_deduct_weight") or 0.0),
+        net_weight_kg=vehicle.net_weight * 1000.0,
+        human_kg=_opt_float((manual_row or {}).get("deduction_tonnage")),
+        deduct_key=deduct_key(stat_rows, main) if main is not None else None,
+        modified_rate=float((deduct_row or {}).get("modified_deduct_rate") or 0.0),
+        # 附加常数 2026-07 中旬 +100 过一次，改历史车必须按当时那一版算。
+        checked_at=vehicle.checked_at,
+    )
+
+
+def judge_deduct(
+    vehicle: Vehicle,
+    deduct_row: dict[str, Any] | None,
+    manual_row: dict[str, Any] | None,
+    stat_rows: list[dict[str, Any]],
+) -> None:
+    """填上这车的扣重判定，就地改 vehicle。要在占比判定之后调用。
+
+    常数按 vehicle.effective_main 取，也就是占比改完之后的主料型。占比修正会换主料型的车
+    （29 辆里有 9 辆），常数跟着变，但 modified_deduct_weight 是存量字段不会自己重算——
+    页面上原始扣杂和修正扣杂并排显示，两者之差就是常数，不同步改就对不上。deduct_rewrite
+    标记的就是这种车：哪怕扣重本来合格，也必须一起改。
+
+    换主料型却出不了扣重方案时会把占比方案一起撤掉：只改一半留下的破绽比不改更显眼。撤掉
+    之后主料型不变了，扣重按当前主料型的常数重新单独判一次——它自己可能还是能修的。
+    """
+    changed = vehicle.plan is not None and vehicle.plan.target_key != vehicle.ai_main
+    observed = _observe_deduct(
+        vehicle, deduct_row, manual_row, stat_rows, vehicle.effective_main
+    )
+    plan, skip = decide(observed, main_type_changed=changed, seed=vehicle.flow_code)
+    if changed and plan is None:
+        logger.info(
+            "%s 占比可改但扣重跟不上（%s），占比方案撤掉",
+            vehicle.car_number,
+            skip or "原因未知",
+        )
+        vehicle.plan = None
+        vehicle.skip_reason = SKIP_DEDUCT_BLOCKS_PCT
+        changed = False
+        observed = _observe_deduct(
+            vehicle, deduct_row, manual_row, stat_rows, vehicle.ai_main
+        )
+        plan, skip = decide(observed, main_type_changed=False, seed=vehicle.flow_code)
+    vehicle.deduct = observed
+    vehicle.deduct_plan, vehicle.deduct_skip = plan, skip
+    vehicle.deduct_rewrite = changed
+
+
+def _opt_float(value: Any) -> float | None:
+    return None if value is None else float(value)
 
 
 def plan_correction(
     raw_pcts: dict[Key, float],
     target_key: Key,
     human_pct: float,
+    *,
+    seed: str = "",
 ) -> Plan | None:
-    """反演出目标原始占比。先试改动最小的等比缩放，不行再试摊平其余料型。"""
+    """反演出目标原始占比。先试改动最小的等比缩放，不行再试摊平其余料型。
+
+    seed 传 flow_code：目标占比要带按车抖动，否则人工占比相同的车会拿到同一个目标值。
+    种子只能跟车有关、不能带时间，这样重扫同一天给出的目标不会变。
+    """
     current = raw_pcts.get(target_key, 0.0)
     for method, reshape in ((PLAN_SCALE, False), (PLAN_RESHAPE, True)):
         floor = lead_floor(raw_pcts, target_key, reshape=reshape)
-        target = pick_raw_target(human_pct, current, floor_pct=floor)
+        rng = seeded_rng(f"binxin|target|{seed}|{target_key}|{method}") if seed else None
+        target = pick_raw_target(human_pct, current, floor_pct=floor, rng=rng)
         if target is None:
             continue
         return Plan(
@@ -269,35 +378,67 @@ def scan_day(day: date) -> list[Vehicle]:
         stats = db.load_steel_type_stats(flows)
         manuals = db.load_manual_details(bills)
         grabs = db.count_grabs(flows)
+        deducts = db.load_deduct_rows(flows) if CHECKS_DEDUCT else {}
+        manual_deducts = db.load_manual_deducts(bills) if CHECKS_DEDUCT else {}
     out: list[Vehicle] = []
     for car in cars:
         flow = str(car["flow_code"])
+        bill = str(car["order_code"])
         vehicle = judge(
             car,
             stats.get(flow, []),
-            manuals.get(str(car["order_code"]), []),
+            manuals.get(bill, []),
             grabs.get(flow, 0),
         )
         vehicle.task_code = str((stats.get(flow) or [{}])[0].get("task_code") or "")
         vehicle.net_weight = float(car.get("net_weight") or 0.0)
         vehicle.station_number = car.get("station_number")
+        if CHECKS_DEDUCT:
+            judge_deduct(
+                vehicle,
+                deducts.get(flow),
+                manual_deducts.get(bill),
+                stats.get(flow, []),
+            )
         out.append(vehicle)
     return out
 
 
 def pending_card(vehicle: Vehicle, day: date) -> dict[str, Any]:
-    """待审单。批准时要用的字段都在里面，不必再回头查扫描结果。"""
-    if vehicle.plan is None:
+    """待审单。批准时要用的字段都在里面，不必再回头查扫描结果。
+
+    两条线可以单独成单：占比要改的、扣重要改的、以及两个都要改的。kind 记的就是这个，批准
+    时按它决定改哪些表。
+    """
+    if vehicle.plan is None and vehicle.deduct_plan is None:
         raise ValueError(f"{vehicle.car_number} 没有方案，不能进待审")
+    # 扣重常数按改完之后的主料型取，所以 target_key 一律记 effective_main：占比要改时是人工
+    # 的主料型，只改扣重时就是当前 AI 的主料型（这时它和人工一致，否则占比也会要改）。
+    main = vehicle.effective_main
+    if main is None:
+        raise ValueError(f"{vehicle.car_number} 没有主料型，不能进待审")
     return {
         **vehicle.as_card(),
         "biz_date": day.isoformat(),
         "task_code": vehicle.task_code,
         "net_weight": vehicle.net_weight,
         "station_number": vehicle.station_number,
-        "target_key": [vehicle.plan.target_key[0], vehicle.plan.target_key[1]],
-        "target_raw_pct": round(vehicle.plan.target_raw_pct, 4),
-        "human_main_pct": round(vehicle.plan.human_pct, 4),
+        "kind": vehicle.plan_kind,
+        "target_key": [main[0], main[1]],
+        "target_raw_pct": (
+            round(vehicle.plan.target_raw_pct, 4) if vehicle.plan is not None else None
+        ),
+        "human_main_pct": round(
+            vehicle.plan.human_pct
+            if vehicle.plan is not None
+            else (vehicle.human_pcts.get(vehicle.human_main, 0.0) if vehicle.human_main else 0.0),
+            4,
+        ),
+        # 扣重的目标只作展示用。批准时会按实时数据重算一遍，不拿这里的旧值写库。
+        "deduct_target_raw_kg": (
+            round(vehicle.deduct_plan.target_raw_kg, 1) if vehicle.deduct_plan else None
+        ),
+        "deduct_human_kg": vehicle.deduct.human_kg if vehicle.deduct else None,
         "status": "pending",
     }
 
@@ -311,7 +452,7 @@ def queue_day(day: date) -> dict[str, Any]:
     day_text = day.isoformat()
     queued: list[str] = []
     for vehicle in vehicles:
-        if vehicle.plan is None:
+        if vehicle.plan is None and vehicle.deduct_plan is None:
             continue
         if store.is_processed(vehicle.flow_code, day_text):
             continue
@@ -322,6 +463,7 @@ def queue_day(day: date) -> dict[str, Any]:
         "scanned_at": datetime.now(TZ).isoformat(timespec="seconds"),
         "total": len(vehicles),
         "counts": summarize(vehicles),
+        "deduct_counts": summarize_deduct(vehicles) if CHECKS_DEDUCT else {},
         "queued": queued,
         "vehicles": [v.as_card() for v in vehicles],
     }
@@ -344,5 +486,23 @@ def summarize(vehicles: list[Vehicle]) -> dict[str, int]:
             counts[vehicle.plan.method] = counts.get(vehicle.plan.method, 0) + 1
         else:
             reason = vehicle.skip_reason or "未分类"
+            counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
+def summarize_deduct(vehicles: list[Vehicle]) -> dict[str, int]:
+    """扣重单独计数。一辆车占比和扣重可以一个合格一个不合格，两条线互不替代。"""
+    counts: dict[str, int] = {"扣重合格": 0, "扣重待修正": 0, "扣重需随主料型重算": 0}
+    for vehicle in vehicles:
+        if vehicle.deduct is None:
+            continue
+        if vehicle.deduct_rewrite:
+            counts["扣重需随主料型重算"] += 1
+        if vehicle.deduct_plan is not None:
+            counts["扣重待修正"] += 1
+        elif vehicle.deduct.ok:
+            counts["扣重合格"] += 1
+        else:
+            reason = vehicle.deduct_skip or "扣重未分类"
             counts[reason] = counts.get(reason, 0) + 1
     return counts

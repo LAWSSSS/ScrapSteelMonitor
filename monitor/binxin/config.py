@@ -17,8 +17,8 @@ STATE_ROOT: Path = ROOT / "binxin_state"
 #: 差异率阈值（%）。见 rate.DIFF_RATE_LIMIT，这里只是给看板文案用的同一个数。
 DIFF_RATE_LIMIT_PCT = 10.0
 
-#: 镔鑫不看扣重扣杂，只看主料型与占比。
-CHECKS_DEDUCT = False
+#: 扣重扣杂也要判。合格线只有一条：|AI−人工| ≤ 100kg，见 deduct.DIFF_LIMIT_KG。
+CHECKS_DEDUCT = True
 
 #: 扫描按自然日，取当天已完成检判的车。
 SCAN_BY_BUSINESS_DAY = True

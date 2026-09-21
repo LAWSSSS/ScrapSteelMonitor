@@ -26,6 +26,7 @@ from monitor.binxin.materials import (
 from monitor.binxin.rate import (
     BAND_MARGIN_PP,
     DIFF_RATE_MISMATCH,
+    JITTER_MAX_PP,
     RAW_MARGIN_PP,
     SEGMENTS,
     band_window,
@@ -39,6 +40,7 @@ from monitor.binxin.rate import (
     normalize,
     pick_raw_target,
     raw_windows_for_display,
+    seeded_rng,
 )
 
 GOLDEN = Path(__file__).parent / "fixtures" / "binxin_rate_golden.json"
@@ -300,6 +302,92 @@ class FeasibilityTests(unittest.TestCase):
         assert target is not None
         self.assertLess(target, current)
         self.assertGreaterEqual(display_main_pct(target), 90.0)
+
+
+class JitterTests(unittest.TestCase):
+    """不抖动时目标必然停在可行区间端点上，人工占比相同的车会拿到同一个值。"""
+
+    #: 40 天真实数据里的 (人工占比, 当前原始占比)，按人工占比分组。
+    REAL = {
+        50.0: [64.23, 80.10, 95.38, 92.64, 88.90, 88.55],
+        80.0: [94.36, 94.54, 93.38, 93.94],
+        100.0: [99.91, 99.43, 97.80, 98.29, 99.78],
+    }
+
+    def test_without_jitter_same_human_pct_collapses(self) -> None:
+        """这是要修的病：不传 rng 时同组车的目标两位小数全同。"""
+        for human, currents in self.REAL.items():
+            targets = {round(pick_raw_target(human, c) or 0.0, 2) for c in currents}
+            with self.subTest(human=human):
+                self.assertEqual(len(targets), 1)
+
+    def test_jitter_separates_cars_in_the_same_group(self) -> None:
+        for human, currents in self.REAL.items():
+            targets = {
+                round(pick_raw_target(human, c, rng=seeded_rng(f"car{i}")) or 0.0, 2)
+                for i, c in enumerate(currents)
+            }
+            with self.subTest(human=human):
+                self.assertEqual(len(targets), len(currents))
+
+    def test_same_seed_gives_same_target(self) -> None:
+        """重复扫描同一辆车必须给出同一个目标，否则页面上的数字会自己变。"""
+        for _ in range(5):
+            self.assertEqual(
+                pick_raw_target(80.0, 94.36, rng=seeded_rng("flow-abc")),
+                pick_raw_target(80.0, 94.36, rng=seeded_rng("flow-abc")),
+            )
+
+    def test_jitter_stays_in_band_and_clear_of_boundaries(self) -> None:
+        edges = [seg.lo for seg in SEGMENTS[1:]] + [seg.hi for seg in SEGMENTS[:-1]]
+        for human in (50.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0):
+            for current in (1.0, 30.0, 49.0, 60.0, 80.0, 94.36, 99.91):
+                for seed in range(20):
+                    target = pick_raw_target(
+                        human, current, rng=seeded_rng(f"{human}|{current}|{seed}")
+                    )
+                    if target is None:
+                        continue
+                    with self.subTest(human=human, current=current, seed=seed):
+                        self.assertTrue(
+                            in_band(human, display_main_pct(target), same_main_type=True)
+                        )
+                        for edge in edges:
+                            self.assertGreaterEqual(
+                                abs(target - edge), RAW_MARGIN_PP - 1e-9
+                            )
+
+    def test_jitter_respects_lead_floor(self) -> None:
+        """抖动不能把目标挪到主料型下界底下，否则改完不是主料型了。"""
+        raw = {(JINGLU, 3): 2.01, ZHONGFEI_KEY: 66.25, (JINGLU, 1): 20.0, (JINGLU, 2): 11.74}
+        floor = lead_floor(raw, (JINGLU, 3))
+        for seed in range(50):
+            target = pick_raw_target(
+                50.0, 2.01, floor_pct=floor, rng=seeded_rng(f"s{seed}")
+            )
+            assert target is not None
+            with self.subTest(seed=seed):
+                self.assertGreater(target, floor)
+
+    def test_jitter_is_bounded(self) -> None:
+        """抖动幅度不能超过 JITTER_MAX_PP，否则白搬体积。"""
+        plain = pick_raw_target(80.0, 94.36)
+        assert plain is not None
+        for seed in range(50):
+            target = pick_raw_target(80.0, 94.36, rng=seeded_rng(f"s{seed}"))
+            assert target is not None
+            with self.subTest(seed=seed):
+                self.assertLessEqual(abs(target - plain), JITTER_MAX_PP + 1e-9)
+
+    def test_jitter_moves_away_from_the_cliff(self) -> None:
+        """人工 80%、原始 94.36% 时端点是 95.5，紧贴 95 的断点；抖动只能往上走。"""
+        plain = pick_raw_target(80.0, 94.36)
+        assert plain is not None
+        for seed in range(50):
+            target = pick_raw_target(80.0, 94.36, rng=seeded_rng(f"s{seed}"))
+            assert target is not None
+            with self.subTest(seed=seed):
+                self.assertGreaterEqual(target, plain)
 
 
 class HumanFinalTests(unittest.TestCase):

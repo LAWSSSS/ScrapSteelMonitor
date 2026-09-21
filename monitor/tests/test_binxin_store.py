@@ -9,13 +9,20 @@ from datetime import date
 from pathlib import Path
 from unittest import mock
 
-from monitor.binxin import backup, dashboard, guard, scan, store
+from monitor.binxin import backup, dashboard, scan, store
+from monitor.binxin.deduct import Deduct, plan_deduct
 from monitor.binxin.materials import JINGLU
 
 DAY = "2026-09-19"
 
 
-def _vehicle(car: str, flow: str, *, with_plan: bool) -> scan.Vehicle:
+def _vehicle(
+    car: str,
+    flow: str,
+    *,
+    with_plan: bool,
+    with_deduct_plan: bool = False,
+) -> scan.Vehicle:
     v = scan.Vehicle(
         car_number=car,
         order_code=f"wb-{car}",
@@ -44,6 +51,20 @@ def _vehicle(car: str, flow: str, *, with_plan: bool) -> scan.Vehicle:
         )
     else:
         v.ok = True
+    if with_deduct_plan:
+        # 人工 360、常数 250：最终扣重 255 低于合格下界 260，需要把原始扣杂从 5 抬到 15~25。
+        v.deduct = Deduct(
+            raw_kg=5.0,
+            modified_kg=255.0,
+            calculated_kg=255.0,
+            final_kg=255.0,
+            net_weight_kg=33660.0,
+            human_kg=360.0,
+            deduct_key=(JINGLU, 2),
+            modified_rate=0.0076,
+        )
+        v.deduct_plan, v.deduct_skip = plan_deduct(v.deduct, seed=flow)
+        assert v.deduct_plan is not None, v.deduct_skip
     return v
 
 
@@ -52,7 +73,7 @@ class StoreTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        for module in (store, backup, guard):
+        for module in (store, backup):
             p = mock.patch.object(module, "STATE_ROOT", self.root)
             p.start()
             self.addCleanup(p.stop)
@@ -148,6 +169,35 @@ class QueueTests(StoreTestCase):
         self.assertEqual(summary["queued"], ["苏A1"])
         self.assertEqual(len(store.list_pending(DAY)), 1)
 
+    def test_deduct_only_car_is_queued(self) -> None:
+        """占比合格、只有扣重不合格的车也要进待审。两条标准各自独立。"""
+        summary = self._run(
+            [_vehicle("苏A2", "f2", with_plan=False, with_deduct_plan=True)]
+        )
+        self.assertEqual(summary["queued"], ["苏A2"])
+        card = store.load_pending("f2", DAY)
+        self.assertEqual(card["kind"], scan.KIND_DEDUCT)
+        self.assertIsNone(card["target_raw_pct"])
+        # 扣重常数按主料型取，所以 target_key 仍要有值。
+        self.assertEqual(card["target_key"], [JINGLU, 2])
+        self.assertIsNotNone(card["deduct_target_raw_kg"])
+
+    def test_both_lines_share_one_card(self) -> None:
+        summary = self._run(
+            [_vehicle("苏A1", "f1", with_plan=True, with_deduct_plan=True)]
+        )
+        self.assertEqual(summary["queued"], ["苏A1"])
+        self.assertEqual(store.load_pending("f1", DAY)["kind"], scan.KIND_BOTH)
+
+    def test_pct_only_card_says_so(self) -> None:
+        self._run([_vehicle("苏A1", "f1", with_plan=True)])
+        self.assertEqual(store.load_pending("f1", DAY)["kind"], scan.KIND_PCT)
+
+    def test_clean_car_is_not_queued(self) -> None:
+        summary = self._run([_vehicle("苏A3", "f3", with_plan=False)])
+        self.assertEqual(summary["queued"], [])
+        self.assertEqual(store.list_pending(DAY), [])
+
     def test_already_processed_car_is_not_requeued(self) -> None:
         store.mark_processed("f1", DAY, {})
         summary = self._run([_vehicle("苏A1", "f1", with_plan=True)])
@@ -188,9 +238,9 @@ class OverviewTests(StoreTestCase):
         self.assertIn("还没扫过", data["notice"])
         self.assertEqual(data["vehicles"], [])
 
-    def test_lock_state_is_included(self) -> None:
-        self.assertIn("allowed", dashboard.overview(DAY)["lock"])
-        self.assertFalse(dashboard.overview(DAY)["lock"]["allowed"])
+    def test_overview_never_carries_a_lock_state(self) -> None:
+        """写库封锁闸 2026-09-21 撤掉了。前端不该再收到 lock 字段。"""
+        self.assertNotIn("lock", dashboard.overview(DAY))
 
     def test_pending_is_keyed_by_flow(self) -> None:
         with mock.patch.object(

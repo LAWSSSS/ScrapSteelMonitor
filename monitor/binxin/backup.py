@@ -1,12 +1,13 @@
 """写库前的快照与回滚脚本。只生成 UPDATE，不生成 DELETE。
 
-镔鑫要改两张表，所以快照也是两份：
+镔鑫要改三张表，快照也是三份：
 
 - intelli_task_check 的逐抓斗行（改 total_volume，可能新增料型行）
 - steel_type_stat 的汇总行（整组重建）
+- intelli_task_info 的扣重行（改原始/修正/核算/最终扣杂与两个占比字段）
 
 新增出来的行没法用 DELETE 回滚（sql_guard 不放行，也不想真删数据），所以回滚脚本把它们的
-体积置零、图片和扣重字段清空，占比上等于不存在。汇总表的行则按快照里的原值改回去。
+体积置零、图片和扣重字段清空，占比上等于不存在。汇总表和扣重行则按快照里的原值改回去。
 """
 
 from __future__ import annotations
@@ -44,6 +45,18 @@ SNAP_STAT_FIELDS = (
     "steel_volume",
     "steel_weight",
 )
+#: intelli_task_info 的扣重字段。改哪些就要存哪些，回滚脚本按这个清单逐个改回去。
+SNAP_DEDUCT_FIELDS = (
+    "flow_code",
+    "deduct_weight",
+    "deduct_weight_rate",
+    "modified_deduct_weight",
+    "modified_deduct_rate",
+    "calculated_deduct_weight",
+    "final_deduct",
+)
+#: 回滚要写回的扣重列，不含主键 flow_code。
+ROLLBACK_DEDUCT_COLUMNS = tuple(c for c in SNAP_DEDUCT_FIELDS if c != "flow_code")
 
 
 def index_path() -> Path:
@@ -76,6 +89,7 @@ def write_snapshot(
     card: dict[str, Any],
     check_rows: list[dict[str, Any]],
     stat_rows: list[dict[str, Any]],
+    deduct_row: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """落库前存一份原样，同时写出回滚脚本。返回两个文件路径。"""
     ensure_dirs()
@@ -100,15 +114,18 @@ def write_snapshot(
         },
         "check_rows": _slim(check_rows, SNAP_CHECK_FIELDS),
         "stat_rows": _slim(stat_rows, SNAP_STAT_FIELDS),
+        "deduct_row": _slim([deduct_row], SNAP_DEDUCT_FIELDS)[0] if deduct_row else None,
         "planned_volume_updates": card.get("volume_updates") or {},
         "planned_inserts": card.get("inserts") or [],
         "planned_stat_rows": card.get("stat_rows") or [],
+        "planned_deduct": card.get("deduct_fields") or {},
     }
     snap_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
     rollback_path.write_text(
-        build_rollback_sql(flow, check_rows, stat_rows, insert_ids=[]), encoding="utf-8"
+        build_rollback_sql(flow, check_rows, stat_rows, insert_ids=[], deduct_row=deduct_row),
+        encoding="utf-8",
     )
     items = _load_index()
     items.append(
@@ -131,10 +148,12 @@ def update_rollback_with_inserts(
     check_rows: list[dict[str, Any]],
     stat_rows: list[dict[str, Any]],
     insert_ids: list[int],
+    deduct_row: dict[str, Any] | None = None,
 ) -> None:
     """新增行的 id 只有写完才知道，回来补进回滚脚本。"""
     Path(rollback_path).write_text(
-        build_rollback_sql(flow_code, check_rows, stat_rows, insert_ids), encoding="utf-8"
+        build_rollback_sql(flow_code, check_rows, stat_rows, insert_ids, deduct_row=deduct_row),
+        encoding="utf-8",
     )
 
 
@@ -149,6 +168,7 @@ def build_rollback_sql(
     check_rows: list[dict[str, Any]],
     stat_rows: list[dict[str, Any]],
     insert_ids: list[int],
+    deduct_row: dict[str, Any] | None = None,
 ) -> str:
     """人能直接贴进 psql 跑的回滚脚本。每条都过 sql_guard。"""
     lines = [
@@ -191,6 +211,13 @@ def build_rollback_sql(
             )
             assert_safe_sql(sql)
             lines.append(sql)
+    if deduct_row:
+        sets = ", ".join(
+            f"{c} = {_num(deduct_row.get(c))}" for c in ROLLBACK_DEDUCT_COLUMNS
+        )
+        sql = f"UPDATE intelli_task_info SET {sets} WHERE flow_code='{flow_code}';"
+        assert_safe_sql(sql)
+        lines.append(sql)
     lines.append("COMMIT;")
     return "\n".join(lines) + "\n"
 

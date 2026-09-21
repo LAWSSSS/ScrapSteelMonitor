@@ -1,7 +1,7 @@
-"""从快照回滚一辆车。逐抓斗体积、新增行、汇总表三样一起复原。
+"""从快照回滚一辆车。逐抓斗体积、新增行、汇总表、扣重四样一起复原。
 
 只发 UPDATE。新增出来的行不删，把体积和历史体积置零，占比上等于不存在。
-和落库一样走 execute_guarded，所以写库封锁闸没开时这里也写不进去。
+和落库一样走 execute_guarded，每条语句都过 sql_guard。
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import logging
 from typing import Any
 
 from monitor.binxin import db
-from monitor.binxin.backup import latest_backup, load_snapshot
+from monitor.binxin.backup import ROLLBACK_DEDUCT_COLUMNS, latest_backup, load_snapshot
 from monitor.binxin.store import append_log, load_processed, ticket_key, unmark_processed
 from monitor.sql_guard import assert_safe_sql
 
@@ -90,6 +90,22 @@ def _stat_statements(
     return out
 
 
+def _deduct_statements(
+    flow_code: str,
+    row: dict[str, Any] | None,
+) -> list[tuple[str, tuple[Any, ...]]]:
+    """把扣重字段改回快照里的原值。老快照没有这一节，跳过。
+
+    原值可能是 NULL（AI 没出修正扣杂的车），所以不能用 _num 兜成 0，要原样写回去。
+    """
+    if not row:
+        return []
+    sets = ", ".join(f"{c} = %s" for c in ROLLBACK_DEDUCT_COLUMNS)
+    sql = f"UPDATE intelli_task_info SET {sets} WHERE flow_code = %s"
+    assert_safe_sql(sql)
+    return [(sql, tuple(row.get(c) for c in ROLLBACK_DEDUCT_COLUMNS) + (flow_code,))]
+
+
 def build_restore_statements(
     snapshot: dict[str, Any],
     insert_ids: list[int],
@@ -98,6 +114,7 @@ def build_restore_statements(
     stmts = _check_statements(flow, snapshot.get("check_rows") or [])
     stmts += _void_statements(flow, insert_ids)
     stmts += _stat_statements(flow, snapshot.get("stat_rows") or [])
+    stmts += _deduct_statements(flow, snapshot.get("deduct_row"))
     if not stmts:
         raise RuntimeError("快照里没有可回滚的内容")
     return stmts
@@ -132,6 +149,7 @@ def restore(flow_code: str, day: str, *, file: str = "") -> dict[str, Any]:
         "snapshot": path,
         "check_rows": len(snapshot.get("check_rows") or []),
         "stat_rows": len(snapshot.get("stat_rows") or []),
+        "deduct_restored": bool(snapshot.get("deduct_row")),
         "voided_inserts": insert_ids,
     }
 
@@ -153,6 +171,7 @@ def main() -> int:
     print(
         f"已回滚 {result['check_rows']} 行逐抓斗、{result['stat_rows']} 行汇总，"
         f"作废新增 {len(result['voided_inserts'])} 行"
+        + ("，扣重已复原" if result["deduct_restored"] else "，快照里没有扣重")
     )
     return 0
 

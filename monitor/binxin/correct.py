@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import random
 from collections import defaultdict
@@ -21,7 +20,13 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
 from monitor.binxin.materials import Key, canonical, is_graded, label, priority_rank
-from monitor.binxin.rate import display_main_pct, in_band, main_key, normalize
+from monitor.binxin.rate import (
+    display_main_pct,
+    in_band,
+    main_key,
+    normalize,
+    seeded_rng,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +59,6 @@ MIN_SPREAD_PP = 3.0
 #: 达成值可能比目标更靠近断点。x=95 处映射会掉 10pp，真骑在上面就等于把结果交给舍入去赌，
 #: 所以这里对达成值再直接验一次。
 CLIFF_SWING_LIMIT_PP = 1.5
-
-
-def _rng(seed: str) -> random.Random:
-    digest = hashlib.md5(seed.encode("utf-8")).hexdigest()
-    return random.Random(int(digest[:16], 16))
 
 
 def _f(value: Any) -> float:
@@ -172,7 +172,7 @@ def plan_grabs(
 
     want = car_vol * target_raw_pct / 100.0
     have = sum(v for (_uid, key), v in vol.items() if key == target_key)
-    rng = _rng(f"binxin|{seed}|{target_key}|{target_raw_pct:.4f}")
+    rng = seeded_rng(f"binxin|{seed}|{target_key}|{target_raw_pct:.4f}")
 
     if want > have:
         _pull_into_target(vol, target_key, want - have, rng, plan)

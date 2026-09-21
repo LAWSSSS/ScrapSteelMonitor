@@ -35,22 +35,21 @@
     button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
     button.ghost { background: transparent; }
     button:disabled { opacity: 0.45; cursor: not-allowed; }
-    .lock {
-      border: 2px solid var(--bad); background: #fef2f2; color: var(--bad);
-      border-radius: 10px; padding: 12px 16px; margin: 8px 0 18px;
-    }
-    .lock.open { border-color: var(--warn); background: #fff7ed; color: var(--warn); }
-    .lock b { font-size: 16px; }
-    .lock p { margin: 6px 0 0; font-size: 13px; }
-    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0; }
+    /* 占比和扣重各三块，窗口窄的时候自己折行，不要把最后一块挤出视口。 */
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 18px 0; }
     .stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
     .stat b { display: block; font-size: 26px; font-weight: 650; }
     .stat span { color: var(--muted); font-size: 13px; }
     .stat.warn b { color: var(--warn); }
     .stat.ok b { color: var(--ok); }
     .notice { border: 1px solid var(--line); background: #fff; padding: 10px 12px; border-radius: 8px; color: var(--muted); }
-    table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }
+    /* 列多，窄窗口下让车次表自己横向滚动，而不是把右边几列推出视口。min-width 只给车次表，
+       不能挂在 table 上——详情里的料型对比表是嵌套的 table，会跟着被撑满。 */
+    .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+    .tablewrap > table { min-width: 1040px; }
+    table { width: 100%; border-collapse: collapse; background: var(--card); }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); font-size: 14px; white-space: nowrap; }
+    .detail td { white-space: normal; }
     th { color: var(--muted); font-weight: 550; }
     tr.clickable { cursor: pointer; }
     tr.clickable:hover { background: #fffaf0; }
@@ -62,7 +61,7 @@
     .bad { color: var(--bad); }
     .detail { background: #fffdf7; }
     .detail td { padding: 14px 16px; }
-    .cmp { width: auto; border: none; background: transparent; }
+    .cmp { width: auto; min-width: 0; border: none; background: transparent; }
     .cmp th, .cmp td { border-bottom: 1px solid var(--line); padding: 5px 14px 5px 0; }
     .cmp td.num { text-align: right; font-variant-numeric: tabular-nums; }
     .plan { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
@@ -77,18 +76,11 @@
 <body>
   <main>
     <h1>镔鑫检判修正看板</h1>
-    <p class="sub">本机 127.0.0.1 · 差异率 = |人工主料型占比 − AI主料型展示占比| ÷ 人工主料型占比，主料型不一致记 100% · 超 10% 才进待审</p>
-
-    <div class="lock" id="lock">
-      <b id="lockTitle">写库状态未知</b>
-      <p id="lockDetail"></p>
-      <div class="row" style="margin-top:10px">
-        <input type="number" id="armMinutes" value="30" min="1" max="240" style="width:90px" />
-        <span class="log">分钟</span>
-        <button class="danger" id="armBtn">解锁写库</button>
-        <button class="ghost" id="disarmBtn">立刻锁死</button>
-      </div>
-    </div>
+    <p class="sub">本机 127.0.0.1 · 两条标准各自独立，任一不合格就进待审</p>
+    <p class="sub">
+      占比：差异率 = |人工主料型占比 − AI主料型展示占比| ÷ 人工主料型占比，主料型不一致记 100%，超 10% 算不合格。<br />
+      扣重：|AI最终扣重 − 人工扣杂| ≤ 100kg，就这一条。AI 最终扣重 = 原始扣杂 + 主料型附加常数（+气割渣、天气扣重）。
+    </p>
 
     <div class="row">
       <span>业务日</span>
@@ -101,25 +93,31 @@
 
     <div class="stats">
       <div class="stat"><b id="sTotal">—</b><span>当日车次</span></div>
-      <div class="stat ok"><b id="sOk">—</b><span>在带内</span></div>
-      <div class="stat warn"><b id="sTodo">—</b><span>待修正</span></div>
+      <div class="stat ok"><b id="sOk">—</b><span>占比在带内</span></div>
+      <div class="stat warn"><b id="sTodo">—</b><span>占比待修正</span></div>
+      <div class="stat ok"><b id="sDedOk">—</b><span>扣重合格</span></div>
+      <div class="stat warn"><b id="sDedTodo">—</b><span>扣重待修正</span></div>
       <div class="stat"><b id="sDone">—</b><span>已落库</span></div>
     </div>
 
     <div class="notice" id="notice">先选业务日，再点「扫描该日」。扫描只读库，不会改任何数据。</div>
 
     <h2>车次</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>车牌</th><th>检判时间</th><th>抓斗</th>
-          <th>人工主料型</th><th>AI主料型</th>
-          <th>人工占比</th><th>AI原始</th><th>AI展示</th>
-          <th>差异率</th><th>结论</th>
-        </tr>
-      </thead>
-      <tbody id="rows"><tr><td colspan="10" class="log">还没有扫描结果</td></tr></tbody>
-    </table>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr>
+            <th>车牌</th><th>检判时间</th><th>抓斗</th>
+            <th>人工主料型</th><th>AI主料型</th>
+            <th>人工占比</th><th>AI原始</th><th>AI展示</th>
+            <th>差异率</th>
+            <th>扣重 AI/人工</th>
+            <th>占比</th><th>扣重</th>
+          </tr>
+        </thead>
+        <tbody id="rows"><tr><td colspan="12" class="log">还没有扫描结果</td></tr></tbody>
+      </table>
+    </div>
 
     <h2>最近操作</h2>
     <div id="logs" class="log">—</div>
@@ -132,6 +130,10 @@ let OPEN = null;
 
 function fmtPct(v) {
   return (v === null || v === undefined || v === "") ? "—" : Number(v).toFixed(2) + "%";
+}
+
+function fmtKg(v, digits) {
+  return (v === null || v === undefined || v === "") ? "—" : Number(v).toFixed(digits ?? 1) + "kg";
 }
 
 function showErr(text) {
@@ -148,21 +150,6 @@ async function api(path, body) {
   const data = await res.json();
   if (!res.ok || data.error) throw new Error(data.error || ("HTTP " + res.status));
   return data;
-}
-
-function renderLock(lock) {
-  const box = $("lock");
-  box.classList.toggle("open", !!lock.allowed);
-  if (lock.allowed) {
-    const mins = Math.max(1, Math.round(lock.seconds_left / 60));
-    $("lockTitle").textContent = "写库已解锁";
-    $("lockDetail").textContent = `还有约 ${mins} 分钟自动锁回（到 ${lock.armed_until}）。批准会真正改库，改前自动存快照和回滚脚本。`;
-  } else {
-    $("lockTitle").textContent = "写库已封锁 · 批准按钮不可用";
-    $("lockDetail").textContent = "还差：" + (lock.blockers || []).join("；");
-  }
-  $("armBtn").disabled = !lock.env_ok;
-  $("armBtn").title = lock.env_ok ? "" : "需要先在环境变量里设置 BINXIN_ALLOW_WRITE=yes-i-approve";
 }
 
 function cmpTable(v) {
@@ -192,54 +179,151 @@ function cmpTable(v) {
 function planBlock(v) {
   const p = v.plan;
   if (!p) return "";
-  const card = DATA.pending[v.flow_code];
-  const lock = DATA.lock || {};
-  const canApprove = !!card && !!lock.allowed;
-  let why = "";
-  if (!card) why = "这辆车不在待审队列里，先扫描该日。";
-  else if (!lock.allowed) why = "写库封锁中，先在上方解锁。";
   return `<div class="plan">
       <dl>
-        <dt>修正目标</dt><dd>${p.target}</dd>
+        <dt>占比修正目标</dt><dd>${p.target}</dd>
         <dt>方式</dt><dd>${p.method}</dd>
         <dt>原始占比</dt><dd>${fmtPct(p.current_raw_pct)} → ${fmtPct(p.target_raw_pct)}</dd>
         <dt>展示占比</dt><dd>改后约 ${fmtPct(p.target_display_pct)}，人工带 ${fmtPct(p.band_lo_pct)} ～ ${fmtPct(p.band_hi_pct)}</dd>
         <dt>保持最高下界</dt><dd>${fmtPct(p.lead_floor_pct)}</dd>
       </dl>
-      <div class="row" style="margin-top:12px">
-        <button class="primary" ${canApprove ? "" : "disabled"}
-          onclick="approve('${v.flow_code}')">批准并落库</button>
-        <button class="ghost" ${card ? "" : "disabled"}
-          onclick="reject('${v.flow_code}')">退回</button>
-        <span class="log">${why}</span>
-      </div>
     </div>`;
 }
 
+function deductBlock(v) {
+  const d = effDeduct(v);
+  if (!d) return "";
+  const written = isWritten(v);
+  // 展示顺序跟业务系统的「智能检判结果」一行对齐：原始 → 常数 → 修正 → 最终。
+  //
+  // 主料型正要变的车，常数取的是【改完之后】那个，跟库里现存的修正扣杂本来就凑不上——这是
+  // 「扣重得跟着一起改」的正常状态，不是错。只有主料型不变却对不上，才真的是破绽。
+  const pending = !written && v.deduct_rewrite;
+  const constNote = pending ? "，改后" : "";
+  const chain = `${fmtKg(d.raw_kg, 2)} + ${fmtKg(d.additional_kg, 0)}`
+    + `（${d.deduct_type || "—"}${constNote}）`
+    + `${d.follows_rule ? " = " : " ≠ 库里现存的 "}${fmtKg(d.modified_kg, 2)}`
+    + (d.qigezha_kg || d.weather_kg
+        ? ` ，再加气割渣 ${fmtKg(d.qigezha_kg, 2)} / 天气 ${fmtKg(d.weather_kg, 2)}` : "");
+  const ruleWarn = (d.follows_rule || pending)
+    ? ""
+    : ' <span class="tag skip">修正扣杂与常数对不上</span>';
+  // 人工离主料型常数超过 100kg 的车，原始扣杂这个唯一旋钮不够长，属于规则覆盖不到，
+  // 不是程序算错。在看板上写明，免得有人反复来问为什么不修。
+  const skipHint = (why) => why && why.includes("主料型常数")
+    ? '<div class="log">AI 最终扣重≈主料型常数（原始扣杂天然只有几 kg），人工离常数超过'
+      + ' 100kg 时调不进合格区间。这是规则覆盖不到的车，不是算错。</div>'
+    : "";
+  // 已落库的车不再显示"目标"和"必须一起改"这类待办口吻的行——那些讲的是改之前的打算。
+  const p = v.deduct_plan;
+  let planRows;
+  if (written) {
+    planRows = `<dt>扣重</dt><dd>已落库，上面的数字是写完从库里回读出来的</dd>`;
+  } else if (p) {
+    planRows = `<dt>扣重修正目标</dt><dd>原始扣杂 ${fmtKg(p.current_raw_kg, 2)} → ${fmtKg(p.target_raw_kg, 1)}`
+      + `（写库 ${p.target_raw_tons} 吨），修正扣杂 ${fmtKg(p.target_modified_kg, 2)}，`
+      + `最终扣重约 ${fmtKg(p.target_final_kg, 2)}</dd>`;
+  } else {
+    planRows = v.deduct_skip
+      ? `<dt>扣重</dt><dd>不修正：${v.deduct_skip}${skipHint(v.deduct_skip)}</dd>` : "";
+  }
+  return `<div class="plan">
+      <dl>
+        <dt>计算链</dt><dd>${chain}${ruleWarn}</dd>
+        <dt>最终扣重</dt><dd>${fmtKg(d.final_kg, 2)}　人工 ${fmtKg(d.human_kg, 1)}</dd>
+        <dt>与人工的差</dt><dd>${fmtKg(d.diff_kg, 1)}　合格区间 ${fmtKg(d.band_lo_kg, 1)} ～ ${fmtKg(d.band_hi_kg, 1)}　（比值 ${d.ratio ?? "—"}，仅供参考，不再作为合格线）</dd>
+        ${(!written && v.deduct_rewrite) ? "<dt>注意</dt><dd>占比修正会换主料型，附加常数跟着变，扣重必须一起改</dd>" : ""}
+        ${planRows}
+      </dl>
+    </div>`;
+}
+
+function actionsBlock(v) {
+  const card = DATA.pending[v.flow_code];
+  const why = card
+    ? "本次会改：" + (card.kind || "占比") + "。点批准会真正写库，写前自动存快照和回滚脚本。"
+    : "这辆车不在待审队列里，先扫描该日。";
+  return `<div class="row" style="margin-top:12px">
+      <button class="primary" ${card ? "" : "disabled"}
+        onclick="approve('${v.flow_code}')">批准并落库</button>
+      <button class="ghost" ${card ? "" : "disabled"}
+        onclick="reject('${v.flow_code}')">退回</button>
+      <span class="log">${why}</span>
+    </div>`;
+}
+
+// 状态判定只写一份，标签和上方计数共用，免得落库后两处对不上。
+function pctState(v) {
+  if (DATA.processed[v.flow_code]) return "done";
+  if (v.ok) return "ok";
+  if (v.plan) return "todo";
+  return "skip";
+}
+
+function dedState(v) {
+  const d = effDeduct(v);
+  if (!d) return "none";
+  if (isWritten(v)) return d.ok ? "done" : "badwrite";
+  if (v.deduct_plan) return "todo";
+  return d.ok ? "ok" : "skip";
+}
+
 function statusTag(v) {
-  if (DATA.processed[v.flow_code]) return '<span class="tag done">已落库</span>';
-  if (v.ok) return '<span class="tag ok">在带内</span>';
-  if (v.plan) return '<span class="tag todo">待修正</span>';
-  return `<span class="tag skip">${v.skip_reason || "未分类"}</span>`;
+  switch (pctState(v)) {
+    case "done": return '<span class="tag done">已落库</span>';
+    case "ok": return '<span class="tag ok">在带内</span>';
+    case "todo": return '<span class="tag todo">待修正</span>';
+    default: return `<span class="tag skip">${v.skip_reason || "未分类"}</span>`;
+  }
+}
+
+// 落库之后，扫描时抓的那份扣重就过期了（页面会一直显示改之前的值，要重扫才对）。
+// processed 里存的是写完从库里回读出来的真值，形状和扫描时一致，整块盖上去即可。
+function effDeduct(v) {
+  const done = DATA.processed[v.flow_code];
+  return (done && done.deduct) || v.deduct;
+}
+
+function isWritten(v) {
+  const done = DATA.processed[v.flow_code];
+  return !!(done && done.deduct);
+}
+
+function deductTag(v) {
+  switch (dedState(v)) {
+    case "none": return '<span class="tag skip">未查扣重</span>';
+    case "done": return '<span class="tag done">已落库</span>';
+    case "badwrite": return '<span class="tag skip">已落库但仍不合格</span>';
+    case "todo": return v.deduct_rewrite
+      ? '<span class="tag todo">随主料型重算</span>'
+      : '<span class="tag todo">待修正</span>';
+    case "ok": return '<span class="tag ok">合格</span>';
+    default: return `<span class="tag skip">${v.deduct_skip || "不合格"}</span>`;
+  }
 }
 
 function render() {
-  const s = DATA.counts || {};
+  // 计数按当前状态现算，不用扫描时冻结的 counts —— 否则落库之后要重扫才会变。
+  const all = DATA.vehicles || [];
+  const tally = (fn, ...want) => all.filter((v) => want.includes(fn(v))).length;
   $("sTotal").textContent = DATA.total ?? "—";
-  $("sOk").textContent = s["在带内"] ?? 0;
-  $("sTodo").textContent = s["待修正"] ?? 0;
+  $("sOk").textContent = tally(pctState, "ok", "done");
+  $("sTodo").textContent = tally(pctState, "todo");
+  $("sDedOk").textContent = tally(dedState, "ok", "done");
+  $("sDedTodo").textContent = tally(dedState, "todo");
   $("sDone").textContent = Object.keys(DATA.processed || {}).length;
   $("notice").textContent = DATA.notice || "";
-  renderLock(DATA.lock || {});
 
   const list = DATA.vehicles || [];
   if (!list.length) {
-    $("rows").innerHTML = '<tr><td colspan="10" class="log">这一天没有车次，或还没有扫描</td></tr>';
+    $("rows").innerHTML = '<tr><td colspan="12" class="log">这一天没有车次，或还没有扫描</td></tr>';
   } else {
     $("rows").innerHTML = list.map((v) => {
       const diff = v.diff_rate_pct;
       const diffTxt = (diff === null || diff === undefined) ? "—" : Number(diff).toFixed(1) + "%";
       const diffCls = (diff !== null && diff !== undefined && diff > 10) ? "bad" : "";
+      const d = effDeduct(v) || {};
+      const dedCls = (effDeduct(v) && !d.ok) ? "bad" : "";
       const open = OPEN === v.flow_code;
       const main = `<tr class="clickable" onclick="toggle('${v.flow_code}')">
           <td>${v.car_number || "—"}</td>
@@ -251,12 +335,16 @@ function render() {
           <td>${fmtPct((v.ai_raw_pcts || {})[v.ai_main])}</td>
           <td>${fmtPct(v.ai_main_pct)}</td>
           <td class="${diffCls}">${diffTxt}</td>
+          <td class="${dedCls}">${fmtKg(d.final_kg, 0)} / ${fmtKg(d.human_kg, 0)}</td>
           <td>${statusTag(v)}</td>
+          <td>${deductTag(v)}</td>
         </tr>`;
       if (!open) return main;
-      return main + `<tr class="detail"><td colspan="10">
+      return main + `<tr class="detail"><td colspan="12">
           ${cmpTable(v)}
           ${planBlock(v)}
+          ${deductBlock(v)}
+          ${actionsBlock(v)}
           <p class="log" style="margin-top:10px">运单 ${v.order_code || "—"} · flow ${v.flow_code}</p>
         </td></tr>`;
     }).join("");
@@ -314,20 +402,8 @@ async function reject(flow) {
   } catch (e) { showErr(String(e.message || e)); }
 }
 
-async function setLock(on) {
-  showErr("");
-  try {
-    await api("/api/lock", on ? { action: "arm", minutes: Number($("armMinutes").value) } : { action: "disarm" });
-    await load();
-  } catch (e) { showErr(String(e.message || e)); }
-}
-
 $("scanBtn").onclick = scan;
 $("refreshBtn").onclick = load;
-$("armBtn").onclick = () => {
-  if (confirm("解锁后「批准并落库」会真正修改镔鑫库的检判结果。确认解锁？")) setLock(true);
-};
-$("disarmBtn").onclick = () => setLock(false);
 $("day").valueAsDate = new Date();
 load();
 setInterval(() => { if (!OPEN) load(); }, 30000);

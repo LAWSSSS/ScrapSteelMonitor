@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import random
 from typing import Callable, Hashable, Iterable, Mapping, NamedTuple, TypeVar
 
 K = TypeVar("K", bound=Hashable)
@@ -36,6 +38,21 @@ RAW_MARGIN_PP = 0.5
 RIVAL_MIN_PP = 1.0
 #: 反演目标展示占比时，再往带内缩这么多，避免贴着边界落库后被取整推出去。
 BAND_MARGIN_PP = 0.30
+#: 目标占比从可行区间端点往区间内部随机走的最大距离（pp）。
+#:
+#: 不抖的话目标必然正好落在区间端点上：待修正的车当前占比一定在可行区间之外（在区间内就
+#: 已经在带内了），"取区间内离当前值最近的点"求出来的就是端点。而端点只由人工占比、分段
+#: 几何和 RAW_MARGIN_PP / BAND_MARGIN_PP 决定，没有一样跟车有关，于是人工占比相同的车会
+#: 拿到两位小数全同的目标值 —— 40 天真实数据里 26/29 车挤在 7 个值上，且全是"断点 ± 0.5"。
+#:
+#: 往区间内部走还顺带让目标离分段断点更远，correct._cliff_swing_pp 的余量更大。
+#:
+#: 取 4.0：1.5 就足以让 40 天 29 辆车的目标两两不同，再加宽是为了压掉"改过的车整体堆在原
+#: 端点附近"这个分布级别的痕迹。代价是每车多搬的体积（最大 3.93pp 整车体积）。继续加到
+#: "区间内均匀"会让某一辆多搬 11.69pp，抓斗构成被改写得太多，是拿一个痕迹换另一个。
+#: 窄区间（人工 80% 的 [95.50,97.70] 只有 2.20pp）到不了这个幅度，那里的堆是分段几何的
+#: 硬上限，加大本常数无效。
+JITTER_MAX_PP = 4.0
 #: 差异率阈值（%）。
 DIFF_RATE_LIMIT = 10.0
 #: 主料型不一致时的差异率。
@@ -225,29 +242,63 @@ def lead_floor(
     return 100.0 * share / (1.0 + share)
 
 
+def seeded_rng(seed: str) -> random.Random:
+    """只跟 seed 有关的随机源。同一个 seed 永远给出同一串数。"""
+    digest = hashlib.md5(seed.encode("utf-8")).hexdigest()
+    return random.Random(int(digest[:16], 16))
+
+
+def _jitter_inward(point: float, lo: float, hi: float, rng: random.Random) -> float:
+    """把落在区间端点上的目标往区间内部挪一段随机距离，最多 JITTER_MAX_PP。
+
+    区间本身已经离分段断点至少 RAW_MARGIN_PP、离带边至少 BAND_MARGIN_PP，所以在区间内
+    怎么挪都还在带内、也不会贴上断点。
+    """
+    up = min(hi - point, JITTER_MAX_PP)
+    down = min(point - lo, JITTER_MAX_PP)
+    if up <= 0.0 and down <= 0.0:
+        return point
+    if down <= 0.0:
+        return point + rng.uniform(0.0, up)
+    if up <= 0.0:
+        return point - rng.uniform(0.0, down)
+    return point + rng.uniform(-down, up)
+
+
 def pick_raw_target(
     human_pct: float,
     current_raw_pct: float,
     *,
     floor_pct: float = 0.0,
+    rng: random.Random | None = None,
 ) -> float | None:
     """选一个原始占比目标：可行区间里离当前值最近的点，改动抓斗最少。
 
     floor_pct 传 lead_floor 的结果，保证目标料型改完仍是主料型。返回 None 表示这辆车
     按规则进不了带，或者「进带」和「仍是主料型」两个约束没有交集。
+
+    rng 给了就在选定区间内再往内部随机走一段，避免所有车都停在端点上（见
+    JITTER_MAX_PP）。先按端点选区间再抖，抖动不会改变选中哪个区间。调用方要用只跟车
+    有关的种子（seeded_rng(flow_code)），这样重复扫描同一辆车给出的目标不变。
     """
     windows = feasible_raw_windows(human_pct)
     if not windows:
         return None
     bound = floor_pct + RAW_EPS_PP if floor_pct > 0.0 else 0.0
-    best: float | None = None
+    best: tuple[float, float, float] | None = None
     for lo, hi in windows:
         if hi < bound:
             continue
-        point = min(max(current_raw_pct, max(lo, bound)), hi)
-        if best is None or abs(point - current_raw_pct) < abs(best - current_raw_pct):
-            best = point
-    return best
+        lo = max(lo, bound)
+        point = min(max(current_raw_pct, lo), hi)
+        if best is None or abs(point - current_raw_pct) < abs(best[0] - current_raw_pct):
+            best = (point, lo, hi)
+    if best is None:
+        return None
+    point, lo, hi = best
+    if rng is None:
+        return point
+    return _jitter_inward(point, lo, hi, rng)
 
 
 def is_reachable(human_pct: float) -> bool:

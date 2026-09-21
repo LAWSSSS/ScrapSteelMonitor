@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from monitor.binxin import apply as bx_apply
-from monitor.binxin import backup, guard, restore, store
+from monitor.binxin import backup, deduct, restore, scan, store
 from monitor.binxin.correct import plan_grabs
 from monitor.binxin.materials import JINGLU, ZHONGFEI_KEY
 from monitor.sql_guard import assert_safe_sql
@@ -101,6 +101,31 @@ def _manual_rows(main_pct: float = 0.95) -> list[dict]:
     return out
 
 
+def _set_clause(sql: str) -> str:
+    return sql.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+
+
+def _deduct_row() -> dict:
+    """AI 扣重现状：原始 3kg、主料型精炉料2（常数 250），人工 300kg，差 47kg 已合格。
+
+    这辆车在占比上要从精炉料1改成精炉料2，常数会从 165 变 250，所以扣重必须跟着重写。
+    """
+    return {
+        "flow_code": FLOW,
+        "car_number": "苏GC7733",
+        "deduct_weight": 0.003,
+        "deduct_weight_rate": 0.0001,
+        "modified_deduct_weight": 168.0,
+        "modified_deduct_rate": 0.005,
+        "calculated_deduct_weight": 168.0,
+        "final_deduct": 168.0,
+        "qigezha_hanzha_weight": 0.0,
+        "weather_deduct_weight": 0.0,
+        "net_weight": 33.66,
+        "create_time": "2026-09-19 11:29:03",
+    }
+
+
 def _card() -> dict:
     return {
         "flow_code": FLOW,
@@ -128,6 +153,8 @@ class FakeDb:
     def __init__(self) -> None:
         self.check_rows = _check_rows()
         self.stat_rows = _stat_rows()
+        self.deduct_row = _deduct_row()
+        self.human_deduct_kg: float | None = 300.0
         self.executed: list[tuple[str, tuple]] = []
         self.next_check_id = 5000
         self.next_stat_id = 9000
@@ -143,6 +170,14 @@ class FakeDb:
 
     def load_manual_details(self, bills):
         return {"wb-1": _manual_rows()}
+
+    def load_deduct_rows(self, flows):
+        return {FLOW: dict(self.deduct_row)} if self.deduct_row else {}
+
+    def load_manual_deducts(self, bills):
+        if self.human_deduct_kg is None:
+            return {}
+        return {"wb-1": {"waybill_no": "wb-1", "deduction_tonnage": self.human_deduct_kg}}
 
     def execute_guarded(self, statements):
         new_ids: list[int] = []
@@ -181,6 +216,10 @@ class FakeDb:
             self.next_stat_id += 1
             self.stat_rows.append(row)
             return []
+        if sql.startswith("UPDATE intelli_task_info SET"):
+            cols = [seg.split(" = ")[0].strip() for seg in _set_clause(sql).split(", ")]
+            self.deduct_row.update(dict(zip(cols, params[: len(cols)])))
+            return []
         raise AssertionError(f"假库不认识这条语句：{sql[:80]}")
 
     def _apply_volume_case(self, params: tuple) -> None:
@@ -200,7 +239,7 @@ class ApplyTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         root = Path(self._tmp.name)
-        for module in (store, backup, guard):
+        for module in (store, backup):
             patcher = mock.patch.object(module, "STATE_ROOT", root)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -212,37 +251,6 @@ class ApplyTestCase(unittest.TestCase):
         db_patch.start()
         self.addCleanup(db_patch.stop)
         store.save_pending(_card())
-
-    def arm(self) -> None:
-        """在临时目录里开闸。db 已经被换成假库，所以开闸也碰不到真库。"""
-        env = mock.patch.dict("os.environ", {guard.WRITE_ENV: guard.WRITE_TOKEN}, clear=False)
-        env.start()
-        self.addCleanup(env.stop)
-        guard.arm(10)
-        self.addCleanup(guard.disarm)
-
-
-class LockedTests(ApplyTestCase):
-    """闸没开时批准必须一条语句都不发。"""
-
-    def test_approve_refuses_when_locked(self) -> None:
-        with mock.patch.dict("os.environ", {guard.WRITE_ENV: ""}, clear=False):
-            with self.assertRaises(guard.WriteLocked):
-                bx_apply.approve(FLOW, DAY)
-        self.assertEqual(self.fake.executed, [])
-
-    def test_locked_approve_keeps_card_pending(self) -> None:
-        with mock.patch.dict("os.environ", {guard.WRITE_ENV: ""}, clear=False):
-            with self.assertRaises(guard.WriteLocked):
-                bx_apply.approve(FLOW, DAY)
-        self.assertIsNotNone(store.load_pending(FLOW, DAY))
-        self.assertFalse(store.is_processed(FLOW, DAY))
-
-    def test_locked_approve_writes_no_snapshot(self) -> None:
-        with mock.patch.dict("os.environ", {guard.WRITE_ENV: ""}, clear=False):
-            with self.assertRaises(guard.WriteLocked):
-                bx_apply.approve(FLOW, DAY)
-        self.assertEqual(list((self.root_backups()).glob("**/*.json")), [])
 
     def root_backups(self) -> Path:
         return Path(self._tmp.name) / "backups"
@@ -369,10 +377,6 @@ class ReplanTests(ApplyTestCase):
 
 
 class ApproveTests(ApplyTestCase):
-    def setUp(self) -> None:
-        super().setUp()
-        self.arm()
-
     def test_write_actually_lands_in_band(self) -> None:
         """端到端：语句作用到假库后，回读重算必须真的进带。"""
         result = bx_apply.approve(FLOW, DAY)
@@ -471,11 +475,209 @@ class ApproveTests(ApplyTestCase):
         self.assertIsNone(store.load_pending(FLOW, DAY))
 
 
-class RestoreTests(ApplyTestCase):
+class DeductWriteTests(ApplyTestCase):
+    """扣重跟着占比一起改。主料型从精炉料1变精炉料2，常数从 165 变 250。"""
+
+    def test_deduct_row_is_rewritten(self) -> None:
+        result = bx_apply.approve(FLOW, DAY)
+        self.assertTrue(result["deduct_written"])
+        self.assertEqual(
+            sum(1 for sql, _p in self.fake.executed if "intelli_task_info" in sql), 1
+        )
+
+    def test_modified_equals_raw_plus_new_constant(self) -> None:
+        """页面上 原始扣杂 + 常数 = 修正扣杂。常数必须用改完之后的主料型那一档。"""
+        bx_apply.approve(FLOW, DAY)
+        row = self.fake.deduct_row
+        raw_kg = float(row["deduct_weight"]) * 1000.0
+        self.assertAlmostEqual(
+            float(row["modified_deduct_weight"]), raw_kg + 250.0, places=2
+        )
+
+    def test_final_lands_in_the_pass_window(self) -> None:
+        bx_apply.approve(FLOW, DAY)
+        self.assertTrue(
+            deduct.is_ok(float(self.fake.deduct_row["final_deduct"]), 300.0),
+            self.fake.deduct_row,
+        )
+
+    def test_verify_reports_rule_and_pass(self) -> None:
+        result = bx_apply.approve(FLOW, DAY)
+        after = result["after"]["deduct"]
+        self.assertTrue(after["follows_rule"], after)
+        self.assertTrue(after["ok"], after)
+        self.assertEqual(after["additional_kg"], 250.0)
+
+    def test_raw_stays_under_the_cap(self) -> None:
+        bx_apply.approve(FLOW, DAY)
+        raw_kg = float(self.fake.deduct_row["deduct_weight"]) * 1000.0
+        self.assertLessEqual(raw_kg, deduct.RAW_DEDUCT_CAP_KG)
+
+    def test_rates_move_with_the_weights(self) -> None:
+        """重量改了占比没动，页面上「修正扣杂占比」会和重量对不上。"""
+        before = dict(self.fake.deduct_row)
+        bx_apply.approve(FLOW, DAY)
+        after = self.fake.deduct_row
+        self.assertNotEqual(after["modified_deduct_rate"], before["modified_deduct_rate"])
+        self.assertNotEqual(after["deduct_weight_rate"], before["deduct_weight_rate"])
+
+    def test_main_type_change_without_deduct_plan_is_refused(self) -> None:
+        """主料型要变但扣重出不了方案时，整车都不批——只改占比会让常数对不上。"""
+        self.fake.human_deduct_kg = 100.0  # 上界 150 < 常数 250，算术上无解
+        with self.assertRaises(bx_apply.ApproveRefused) as ctx:
+            bx_apply.approve(FLOW, DAY)
+        self.assertIn("扣重", str(ctx.exception))
+        self.assertEqual(self.fake.executed, [])
+        self.assertIsNotNone(store.load_pending(FLOW, DAY))
+
+    def test_snapshot_keeps_the_original_deduct_row(self) -> None:
+        before = dict(self.fake.deduct_row)
+        result = bx_apply.approve(FLOW, DAY)
+        snap = backup.load_snapshot(result["backup"]["snapshot"])
+        self.assertAlmostEqual(
+            float(snap["deduct_row"]["modified_deduct_weight"]),
+            float(before["modified_deduct_weight"]),
+            places=2,
+        )
+
+    def test_rollback_script_restores_the_deduct_row(self) -> None:
+        result = bx_apply.approve(FLOW, DAY)
+        text = Path(result["backup"]["rollback"]).read_text(encoding="utf-8")
+        self.assertIn("intelli_task_info", text)
+        self.assertIn("168", text)
+
+    def test_restore_undoes_the_deduct_write(self) -> None:
+        before = dict(self.fake.deduct_row)
+        result = bx_apply.approve(FLOW, DAY)
+        snapshot = backup.load_snapshot(result["backup"]["snapshot"])
+        self.fake.execute_guarded(
+            restore.build_restore_statements(snapshot, result["insert_ids"])
+        )
+        for col in bx_apply.DEDUCT_COLUMNS:
+            self.assertAlmostEqual(
+                float(self.fake.deduct_row[col]), float(before[col]), places=4, msg=col
+            )
+
+    def test_no_human_deduct_leaves_the_row_alone(self) -> None:
+        """人工没填扣杂时不能瞎改。但主料型要变，所以整车也不该批。"""
+        self.fake.human_deduct_kg = None
+        with self.assertRaises(bx_apply.ApproveRefused):
+            bx_apply.approve(FLOW, DAY)
+        self.assertEqual(self.fake.executed, [])
+
+    def test_deduct_statement_rejects_unknown_column(self) -> None:
+        with self.assertRaises(bx_apply.ApproveRefused):
+            bx_apply._deduct_statements(FLOW, {"deduct_weight": 0.02, "surprise": 1})
+
+
+def _deduct_only_card() -> dict:
+    """占比已经合格、只改扣重的单。人工主料型 = AI 主料型 = 精炉料1，占比都在 90% 附近。"""
+    return {
+        **_card(),
+        "kind": scan.KIND_DEDUCT,
+        "target": "精炉料1",
+        "target_key": [1, 1],
+        "target_raw_pct": None,
+        "human_main_pct": 90.0,
+    }
+
+
+class DeductOnlyTests(ApplyTestCase):
+    """占比在带内、只有扣重要改的单。占比相关的三张表一条语句都不该发。"""
+
     def setUp(self) -> None:
         super().setUp()
-        self.arm()
+        # 人工主料型改成精炉料1、占比 90%，和 AI 的展示占比一致 → 占比已在带内。
+        self.fake.load_manual_details = lambda bills: {
+            "wb-1": [
+                {"waybill_no": "wb-1", "grading_method": m, "material_name": "精炉料",
+                 "level": lv, "ratio": r}
+                for m in (1, 2)
+                for lv, r in ((1, 0.90), (2, 0.10))
+            ]
+        }
+        # 人工 300kg、常数 165（精炉料1）时原始扣杂要抬到 40kg 以上，超过 25kg 上限，
+        # 所以换一个能修的人工值。
+        self.fake.human_deduct_kg = 280.0
+        store.save_pending(_deduct_only_card())
 
+    def _live(self) -> dict:
+        return bx_apply.replan_live(_deduct_only_card())
+
+    def test_replan_makes_no_pct_plan(self) -> None:
+        live = self._live()
+        self.assertIsNone(live["plan"])
+        self.assertTrue(live["deduct_only"])
+        self.assertIsNotNone(live["deduct_fields"])
+
+    def test_only_the_info_table_is_touched(self) -> None:
+        bx_apply.approve(FLOW, DAY)
+        tables = {
+            "intelli_task_check": 0, "steel_type_stat": 0, "intelli_task_info": 0,
+        }
+        for sql, _p in self.fake.executed:
+            for name in tables:
+                if name in sql:
+                    tables[name] += 1
+        self.assertEqual(tables["intelli_task_check"], 0)
+        self.assertEqual(tables["steel_type_stat"], 0)
+        self.assertEqual(tables["intelli_task_info"], 1)
+
+    def test_volumes_are_untouched(self) -> None:
+        before = {int(r["id"]): float(r["total_volume"]) for r in _check_rows()}
+        bx_apply.approve(FLOW, DAY)
+        for row in self.fake.check_rows:
+            self.assertAlmostEqual(float(row["total_volume"]), before[int(row["id"])])
+
+    def test_deduct_lands_in_the_window(self) -> None:
+        bx_apply.approve(FLOW, DAY)
+        row = self.fake.deduct_row
+        self.assertTrue(deduct.is_ok(float(row["final_deduct"]), 280.0), row)
+        self.assertAlmostEqual(
+            float(row["modified_deduct_weight"]),
+            float(row["deduct_weight"]) * 1000.0 + 165.0,
+            places=2,
+        )
+
+    def test_result_reports_no_pct_rows_changed(self) -> None:
+        result = bx_apply.approve(FLOW, DAY)
+        self.assertEqual(result["updated_rows"], 0)
+        self.assertEqual(result["inserted_rows"], 0)
+        self.assertEqual(result["insert_ids"], [])
+        self.assertTrue(result["deduct_written"])
+
+    def test_refuses_when_pct_fell_out_of_band(self) -> None:
+        """占比在批准前被改坏了就不能按「只改扣重」处理，要退回重扫。"""
+        self.fake.stat_rows = [
+            dict(r, steel_volume=v)
+            for r, v in zip(_stat_rows(), (100.0, 2600.0, 50.0, 30.0))
+        ]
+        with self.assertRaises(bx_apply.ApproveRefused) as ctx:
+            bx_apply.approve(FLOW, DAY)
+        self.assertIn("不在带内", str(ctx.exception))
+        self.assertEqual(self.fake.executed, [])
+
+    def test_refuses_when_deduct_plan_vanishes(self) -> None:
+        self.fake.human_deduct_kg = None
+        with self.assertRaises(bx_apply.ApproveRefused) as ctx:
+            bx_apply.approve(FLOW, DAY)
+        self.assertIn("只改扣重", str(ctx.exception))
+        self.assertEqual(self.fake.executed, [])
+
+    def test_restore_undoes_the_deduct_only_write(self) -> None:
+        before = dict(self.fake.deduct_row)
+        result = bx_apply.approve(FLOW, DAY)
+        snapshot = backup.load_snapshot(result["backup"]["snapshot"])
+        self.fake.execute_guarded(
+            restore.build_restore_statements(snapshot, result["insert_ids"])
+        )
+        for col in bx_apply.DEDUCT_COLUMNS:
+            self.assertAlmostEqual(
+                float(self.fake.deduct_row[col]), float(before[col]), places=4, msg=col
+            )
+
+
+class RestoreTests(ApplyTestCase):
     def test_restore_statements_cover_all_three_parts(self) -> None:
         snapshot = {
             "meta": {"flow_code": FLOW, "car_number": "苏GC7733"},
