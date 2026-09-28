@@ -139,6 +139,12 @@ DED_SKIP_CONST_TOO_HIGH: Final = "人工扣杂低于主料型常数太多，压�
 DED_SKIP_RAW_TOO_HIGH: Final = "人工扣杂高出主料型常数太多，补不上去"
 DED_SKIP_CAP_BLOCKS: Final = "目标会触到核算封顶"
 
+#: 主料型要变、但按新常数怎么调原始扣杂都进不了人工 ±100kg。这三条例外允许占比照改：
+#: 扣重只改成「现有原始扣杂 + 新常数」，不再追人工。常数本身未知的情况不在这里。
+CONSTANT_MISS_SKIPS: Final[frozenset[str]] = frozenset(
+    {DED_SKIP_CONST_TOO_HIGH, DED_SKIP_RAW_TOO_HIGH, DED_SKIP_CAP_BLOCKS}
+)
+
 
 def const_era(checked_at: str) -> str:
     """这辆车的检判时间落在常数表的哪一版上。
@@ -294,6 +300,8 @@ class DeductPlan:
     additional_kg: float
     extra_kg: float
     human_kg: float
+    #: 主料型优先时，最终扣重可以落在人工 ±100kg 之外。原始扣杂保持不动。
+    accept_miss: bool = False
 
     @property
     def target_modified_kg(self) -> float:
@@ -312,6 +320,7 @@ class DeductPlan:
             "extra_kg": round(self.extra_kg, 2),
             "band_lo_kg": round(lo, 2),
             "band_hi_kg": round(hi, 2),
+            "accept_miss": self.accept_miss,
         }
 
 
@@ -369,6 +378,42 @@ def decide(
     if observed.ok and not main_type_changed:
         return None, ""
     return plan_deduct(observed, seed=seed)
+
+
+def follow_constant(observed: Deduct) -> DeductPlan:
+    """主料型换了、合格方案又出不来时：原始扣杂不动，修正扣杂改成 原始 + 新常数。
+
+    最终扣重会离开人工的 ±100kg。这是主料型优先时允许的，不再用原始扣杂去追人工。
+    """
+    add = observed.additional_kg
+    if add is None or observed.human_kg is None:
+        raise ValueError("没有常数或人工扣杂，不能按常数重写扣重")
+    raw = float(Decimal(str(observed.raw_kg)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+    extra = observed.extra_kg
+    return DeductPlan(
+        target_raw_kg=raw,
+        target_final_kg=round(raw + add + extra, 2),
+        current_raw_kg=observed.raw_kg,
+        additional_kg=add,
+        extra_kg=extra,
+        human_kg=observed.human_kg,
+        accept_miss=True,
+    )
+
+
+def plan_when_main_type_changes(
+    observed: Deduct, *, seed: str = ""
+) -> tuple[DeductPlan | None, str]:
+    """主料型要变时的扣重方案。能合格就按合格方案；不能合格就按新常数重写。
+
+    常数未知（过渡期、重废2、没有人工、料型不在白名单）仍然返回空方案，调用方应整车不改。
+    """
+    plan, skip = decide(observed, main_type_changed=True, seed=seed)
+    if plan is not None:
+        return plan, ""
+    if skip in CONSTANT_MISS_SKIPS:
+        return follow_constant(observed), skip
+    return None, skip
 
 
 def plan_deduct(observed: Deduct, *, seed: str = "") -> tuple[DeductPlan | None, str]:

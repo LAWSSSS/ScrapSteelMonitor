@@ -18,7 +18,7 @@ from typing import Any, Iterable
 
 from monitor.binxin import db, store
 from monitor.binxin.config import CHECKS_DEDUCT, MIN_GRABS_TO_CORRECT
-from monitor.binxin.deduct import Deduct, DeductPlan, decide, deduct_key
+from monitor.binxin.deduct import Deduct, DeductPlan, decide, deduct_key, plan_when_main_type_changes
 from monitor.binxin.materials import Key, canonical, from_manual, is_graded, label, priority_rank
 from monitor.binxin.rate import (
     band_window,
@@ -303,22 +303,25 @@ def judge_deduct(
 ) -> None:
     """填上这车的扣重判定，就地改 vehicle。要在占比判定之后调用。
 
-    常数按 vehicle.effective_main 取，也就是占比改完之后的主料型。占比修正会换主料型的车
-    （29 辆里有 9 辆），常数跟着变，但 modified_deduct_weight 是存量字段不会自己重算——
-    页面上原始扣杂和修正扣杂并排显示，两者之差就是常数，不同步改就对不上。deduct_rewrite
-    标记的就是这种车：哪怕扣重本来合格，也必须一起改。
+    常数按 vehicle.effective_main 取，也就是占比改完之后的主料型。占比修正会换主料型的车，
+    常数跟着变，但 modified_deduct_weight 是存量字段不会自己重算——页面上原始扣杂和修正
+    扣杂并排显示，两者之差就是常数，不同步改就对不上。deduct_rewrite 标记的就是这种车。
 
-    换主料型却出不了扣重方案时会把占比方案一起撤掉：只改一半留下的破绽比不改更显眼。撤掉
-    之后主料型不变了，扣重按当前主料型的常数重新单独判一次——它自己可能还是能修的。
+    主料型正确优先于扣重合格。换主料型后，扣重能落进人工 ±100kg 就按合格方案改；落不进、
+    但新常数是已知的，就保持原始扣杂，只把修正扣杂改成 原始 + 新常数，最终扣重偏离人工也
+    照样改占比。只有常数本身未知（过渡期、重废2、没有人工）才把占比方案一起撤掉。
     """
     changed = vehicle.plan is not None and vehicle.plan.target_key != vehicle.ai_main
     observed = _observe_deduct(
         vehicle, deduct_row, manual_row, stat_rows, vehicle.effective_main
     )
-    plan, skip = decide(observed, main_type_changed=changed, seed=vehicle.flow_code)
+    if changed:
+        plan, skip = plan_when_main_type_changes(observed, seed=vehicle.flow_code)
+    else:
+        plan, skip = decide(observed, main_type_changed=False, seed=vehicle.flow_code)
     if changed and plan is None:
         logger.info(
-            "%s 占比可改但扣重跟不上（%s），占比方案撤掉",
+            "%s 占比可改但扣重常数未知（%s），占比方案撤掉",
             vehicle.car_number,
             skip or "原因未知",
         )
@@ -330,7 +333,9 @@ def judge_deduct(
         )
         plan, skip = decide(observed, main_type_changed=False, seed=vehicle.flow_code)
     vehicle.deduct = observed
-    vehicle.deduct_plan, vehicle.deduct_skip = plan, skip
+    vehicle.deduct_plan = plan
+    # 合格方案不带跳过原因。按常数放行的方案保留原因，看板上要写明这次不追扣重合格。
+    vehicle.deduct_skip = skip if plan is None or plan.accept_miss else ""
     vehicle.deduct_rewrite = changed
 
 

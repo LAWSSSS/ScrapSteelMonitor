@@ -521,14 +521,17 @@ class DeductWriteTests(ApplyTestCase):
         self.assertNotEqual(after["modified_deduct_rate"], before["modified_deduct_rate"])
         self.assertNotEqual(after["deduct_weight_rate"], before["deduct_weight_rate"])
 
-    def test_main_type_change_without_deduct_plan_is_refused(self) -> None:
-        """主料型要变但扣重出不了方案时，整车都不批——只改占比会让常数对不上。"""
-        self.fake.human_deduct_kg = 100.0  # 上界 150 < 常数 250，算术上无解
-        with self.assertRaises(bx_apply.ApproveRefused) as ctx:
-            bx_apply.approve(FLOW, DAY)
-        self.assertIn("扣重", str(ctx.exception))
-        self.assertEqual(self.fake.executed, [])
-        self.assertIsNotNone(store.load_pending(FLOW, DAY))
+    def test_main_type_change_writes_constant_when_human_band_is_unreachable(self) -> None:
+        """上界 200 < 新常数 250：扣重进不了合格区间，占比仍改，扣重按新常数重写。"""
+        self.fake.human_deduct_kg = 100.0
+        result = bx_apply.approve(FLOW, DAY)
+        self.assertTrue(result["deduct_written"])
+        row = self.fake.deduct_row
+        raw_kg = float(row["deduct_weight"]) * 1000.0
+        self.assertAlmostEqual(float(row["modified_deduct_weight"]), raw_kg + 250.0, places=2)
+        after = result["after"]["deduct"]
+        self.assertTrue(after["follows_rule"], after)
+        self.assertFalse(after["ok"], after)
 
     def test_snapshot_keeps_the_original_deduct_row(self) -> None:
         before = dict(self.fake.deduct_row)

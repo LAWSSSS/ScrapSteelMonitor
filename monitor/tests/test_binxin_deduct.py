@@ -32,7 +32,7 @@ from monitor.binxin.deduct import (
     plan_deduct,
 )
 from monitor.binxin.materials import JINGLU, ZHONGFEI, ZHONGFEI_KEY
-from monitor.binxin.scan import SKIP_DEDUCT_BLOCKS_PCT, judge, judge_deduct
+from monitor.binxin.scan import judge, judge_deduct
 
 J1 = (JINGLU, 1)
 J2 = (JINGLU, 2)
@@ -460,19 +460,24 @@ class CouplingTests(unittest.TestCase):
         # 库里的 256.9 = 6.9 + 250，配的是旧主料型，所以按新常数看就对不上了。
         self.assertFalse(vehicle.deduct.follows_rule)
 
-    def test_whole_car_dropped_when_deduct_cannot_follow(self):
-        """人工 400：换到常数 165 后要把原始扣杂抬到 140kg，远超 25kg 上限，扣重跟不上。
+    def test_main_type_kept_when_constant_misses_human(self):
+        """人工 400：换到常数 165 后要把原始扣杂抬过上限，扣重进不了 ±100kg。
 
-        这时只改占比会留下 原始扣杂 + 常数 ≠ 修正扣杂 的破绽，比占比本身更显眼，所以整车
-        放弃。撤掉占比方案后主料型不变，扣重按旧常数 250 再单独判一次。
+        主料型正确优先。占比方案保留，扣重只改成 原始 + 新常数，不再追人工。
         """
         vehicle = self._type_changing_car(400.0)
-        self.assertIsNone(vehicle.plan)
-        self.assertEqual(vehicle.skip_reason, SKIP_DEDUCT_BLOCKS_PCT)
-        self.assertFalse(vehicle.deduct_rewrite)
-        # 主料型不动了，常数回到 AI 当前主料型精炉料2 的 250。
-        self.assertEqual(vehicle.deduct.additional_kg, 250.0)
-        self.assertTrue(vehicle.deduct.follows_rule)
+        self.assertIsNotNone(vehicle.plan)
+        self.assertEqual(vehicle.plan.target_key, J1)
+        self.assertEqual(vehicle.skip_reason, "")
+        self.assertTrue(vehicle.deduct_rewrite)
+        self.assertEqual(vehicle.deduct.additional_kg, 165.0)
+        plan = vehicle.deduct_plan
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertTrue(plan.accept_miss)
+        self.assertAlmostEqual(plan.target_raw_kg, 6.9, places=1)
+        self.assertAlmostEqual(plan.target_modified_kg, 171.9, places=1)
+        self.assertFalse(is_ok(plan.target_final_kg, 400.0))
 
     def test_checked_at_reaches_the_deduct_judgement(self):
         """整条链路要真的把检判时间传下去，否则常数分版形同虚设。

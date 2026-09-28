@@ -20,7 +20,7 @@ from monitor.binxin import db
 from monitor.binxin.backup import update_rollback_with_inserts, write_snapshot
 from monitor.binxin.config import CHECKS_DEDUCT
 from monitor.binxin.correct import CLONE_CLEAR, GrabPlan, plan_grabs, rebuild_stat_rows
-from monitor.binxin.deduct import Deduct, decide, deduct_key, target_fields
+from monitor.binxin.deduct import Deduct, decide, deduct_key, plan_when_main_type_changes, target_fields
 from monitor.binxin.materials import Key, label, priority_rank
 from monitor.binxin.rate import in_band, main_key, normalize
 from monitor.binxin.scan import (
@@ -328,7 +328,8 @@ def _replan_deduct(
     """回读实时扣重并重新出方案。CHECKS_DEDUCT 关着就什么都不做。
 
     常数按 target_key（改完之后的主料型）取，不是按当前的 ai_main。主料型要变的车即便扣重
-    已经合格也得重写，否则页面上 原始扣杂 + 常数 ≠ 修正扣杂。
+    已经合格也得重写，否则页面上 原始扣杂 + 常数 ≠ 修正扣杂。新常数已知、但最终扣重进不了
+    人工 ±100kg 时，保持原始扣杂，只按新常数重写修正扣杂，占比照样改。
     """
     if not CHECKS_DEDUCT:
         return {"deduct_row": None, "deduct_plan": None, "deduct_fields": None, "deduct_skip": ""}
@@ -350,15 +351,18 @@ def _replan_deduct(
         checked_at=str(card.get("checked_at") or ""),
     )
     changed = ai_main != target_key
-    plan, skip = decide(observed, main_type_changed=changed, seed=flow)
+    if changed:
+        plan, skip = plan_when_main_type_changes(observed, seed=flow)
+    else:
+        plan, skip = decide(observed, main_type_changed=False, seed=flow)
     fields = (
         target_fields(plan, observed, net_weight_t=net_weight_t) if plan is not None else None
     )
     if changed and plan is None:
-        # 主料型要变却出不了扣重方案，写下去页面上常数就会对不上。宁可整车不批。
+        # 常数未知时不能只改占比，否则页面上 原始扣杂 + 常数 ≠ 修正扣杂。
         raise ApproveRefused(
             f"主料型要从 {label(ai_main) if ai_main else '空'} 改成 {label(target_key)}，"
-            f"扣重常数会跟着变，但扣重方案出不来（{skip or '原因未知'}）。"
+            f"扣重常数会跟着变，但新常数定不下来（{skip or '原因未知'}）。"
             "只改占比会让页面上 原始扣杂 + 常数 ≠ 修正扣杂，已中止。"
         )
     return {

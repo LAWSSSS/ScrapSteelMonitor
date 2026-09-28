@@ -226,6 +226,10 @@ function deductBlock(v) {
   let planRows;
   if (written) {
     planRows = `<dt>扣重</dt><dd>已应用，上面的数字已经从业务系统重新核对</dd>`;
+  } else if (p && p.accept_miss) {
+    planRows = `<dt>扣重</dt><dd>主料型优先。原始扣杂保持 ${fmtKg(p.target_raw_kg, 1)}，`
+      + `修正扣杂改为 ${fmtKg(p.target_modified_kg, 2)}（新常数），`
+      + `最终扣重约 ${fmtKg(p.target_final_kg, 2)}，和人工的差会超过 100kg。这次不追扣重合格。</dd>`;
   } else if (p) {
     planRows = `<dt>扣重修正目标</dt><dd>原始扣杂 ${fmtKg(p.current_raw_kg, 2)} → ${fmtKg(p.target_raw_kg, 1)}`
       + `（应用值 ${p.target_raw_tons} 吨），修正扣杂 ${fmtKg(p.target_modified_kg, 2)}，`
