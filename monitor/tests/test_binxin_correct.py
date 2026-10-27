@@ -166,6 +166,23 @@ class PlanTests(unittest.TestCase):
         after = sum(float(r["total_volume"]) for r in _after_rows(rows, plan))
         self.assertAlmostEqual(before, after, delta=before * 1e-6)
 
+    def test_each_grab_shows_the_target_as_its_head(self) -> None:
+        """详情是一斗一斗看的。整车对了但多数斗仍是旧料型占大头，页面会对不上。"""
+        rows = _car()
+        plan = plan_grabs(rows, (JINGLU, 2), 64.5, seed="s", human_pct=95.0)
+        self.assertTrue(plan.ok, plan.reason)
+        after = _after_rows(rows, plan)
+        by_uuid: dict[str, dict[tuple[int, int], float]] = {}
+        for row in after:
+            uid = str(row["uuid"])
+            key = (int(row["steel_type"]), int(row["steel_level"]))
+            by_uuid.setdefault(uid, {})
+            by_uuid[uid][key] = by_uuid[uid].get(key, 0.0) + float(row["total_volume"])
+        for uid, vols in by_uuid.items():
+            target = vols.get((JINGLU, 2), 0.0)
+            rivals = [amount for key, amount in vols.items() if key != (JINGLU, 2)]
+            self.assertGreater(target, max(rivals, default=0.0), msg=uid)
+
     def test_grabs_stay_uneven(self) -> None:
         rows = _car()
         plan = plan_grabs(rows, (JINGLU, 2), 64.5, seed="s", human_pct=95.0)

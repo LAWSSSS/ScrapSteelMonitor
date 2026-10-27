@@ -4,11 +4,13 @@
 和全部元数据，只有 total_volume 不同。所以调占比就是在 uuid 内部把体积从别的料型搬到目标
 料型（或反向），uuid 缺目标料型行时克隆同 uuid 的兄弟行补一行。
 
-三条从盛隆那边继承的教训：
+四条从盛隆那边继承、以及镔鑫详情页补上的教训：
 
 1. 克隆必须从同一 uuid 的兄弟行取 images，否则页面上那格图是空的。
 2. deduct_weight 每个 uuid 只挂一行，克隆时必须清掉，否则整车扣重翻倍。
 3. 每个抓斗的占比要带随机抖动，不能所有抓斗算出同一个比例，那一眼就能看出是改的。
+4. 只把整车加总搬对还不够。详情是一斗一斗看的，多数斗仍是旧料型占大头时，
+   和汇总页对不上。每一斗里目标料型都要是最大的那一块。
 """
 
 from __future__ import annotations
@@ -49,6 +51,8 @@ CLONE_CLEAR = (
 
 #: 其余料型的上限 = 目标占比 − 这个余量，保证目标稳稳最高。
 LEAD_GAP_PP = 1.5
+#: 单个抓斗内部，目标料型要比同斗其他料型至少高出这么多，详情里才看得出谁是大头。
+GRAB_HEAD_GAP_PP = 0.8
 #: 目标占比的允许误差（pp）。搬体积搬不到绝对精确。
 TARGET_TOL_PP = 0.35
 #: 抓斗之间目标料型占比的极差至少要有这么多 pp，否则太齐整。
@@ -182,6 +186,9 @@ def plan_grabs(
         return plan
 
     _cap_rivals(vol, by_uuid, target_key, rng)
+    # 整车加总对了之后，再把目标体积摊回每一斗。否则大斗被抽空、小斗几乎不动，
+    # 汇总是新料型，点开每一次质检仍是旧料型占大头。
+    _shape_each_grab(vol, by_uuid, target_key, rng)
     _emit_changes(vol, by_uuid, plan)
     if not plan.ok:
         return plan
@@ -270,6 +277,27 @@ def _push_out_of_target(
         plan.reason = f"可摊出的体积不够，还差 {remain / need:.1%}"
 
 
+def _split_like(
+    keys: Sequence[Key],
+    amount: float,
+    current: dict[Key, float],
+    rng: random.Random,
+) -> dict[Key, float]:
+    """按这一斗原来的对手比例分，只加一点抖动，避免把没出现过的料型分出体积。"""
+    weights = [max(current.get(key, 0.0), 0.0) * (0.85 + 0.3 * rng.random()) for key in keys]
+    if sum(weights) <= 0.0:
+        return _split(keys, amount, rng)
+    total = sum(weights)
+    out: dict[Key, float] = {}
+    left = amount
+    for index, key in enumerate(keys):
+        part = left if index == len(keys) - 1 else amount * weights[index] / total
+        left -= part
+        if part > 0.0:
+            out[key] = part
+    return out
+
+
 def _split(keys: Sequence[Key], amount: float, rng: random.Random) -> dict[Key, float]:
     """把 amount 随机不均地分给几个料型。"""
     weights = [0.4 + rng.random() for _ in keys]
@@ -325,6 +353,127 @@ def _cap_rivals(
             left -= take
             tkey = (holder[0], target_key)
             vol[tkey] = vol.get(tkey, 0.0) + take
+
+
+def _grab_floor_share(n_rivals: int) -> float:
+    """这一斗里目标料型至少要占多少，才稳稳高于同斗的其他料型。
+
+    其余体积再怎么堆到一个对手身上，也不能压过目标。对手越多，这条下限越低。
+    """
+    if n_rivals <= 0:
+        return 100.0
+    return (100.0 + n_rivals * GRAB_HEAD_GAP_PP) / (n_rivals + 1)
+
+
+def _shape_each_grab(
+    vol: dict[tuple[str, Key], float],
+    by_uuid: dict[str, dict[Key, list[dict[str, Any]]]],
+    target_key: Key,
+    rng: random.Random,
+) -> None:
+    """保持目标料型的整车体积不变，改每一斗的内部分配。
+
+    能做到的斗，目标料型都是最大的一块。整车目标体积不够把每一斗都抬过下限时，
+    先保证体积大的斗，小斗保持原样。
+    """
+    totals = {
+        uid: sum(amount for (u, _key), amount in vol.items() if u == uid)
+        for uid in by_uuid
+    }
+    uids = [uid for uid, total in totals.items() if total > 0.0]
+    if not uids:
+        return
+    have = sum(amount for (_uid, key), amount in vol.items() if key == target_key)
+
+    def rivals_of(uid: str) -> list[Key]:
+        # 只保留这一斗里本来就有体积的料型。把零头摊到原本没有的料型上，
+        # 会让汇总里本来可以忽略的料型突然变多。
+        return sorted(
+            key
+            for (u, key), amount in vol.items()
+            if u == uid and key != target_key and amount > 0.0
+        )
+
+    pure = [uid for uid in uids if not rivals_of(uid)]
+    flexible = [uid for uid in uids if rivals_of(uid)]
+    locked = sum(totals[uid] for uid in pure)
+    budget = have - locked
+    if budget < -have * 1e-6:
+        return
+
+    floor: dict[str, float] = {}
+    for uid in flexible:
+        share = _grab_floor_share(len(rivals_of(uid))) / 100.0
+        floor[uid] = totals[uid] * share
+
+    assigned = {uid: totals[uid] for uid in pure}
+    # 体积大的斗先拿到「能当大头」的下限，小斗用剩下的。
+    left = max(0.0, budget)
+    for uid in sorted(flexible, key=lambda item: -totals[item]):
+        give = min(floor[uid], left)
+        assigned[uid] = give
+        left -= give
+    extra = left
+    room = {uid: max(0.0, totals[uid] - assigned[uid]) for uid in flexible}
+    weights = {uid: totals[uid] * (0.55 + 0.9 * rng.random()) for uid in flexible}
+    for _ in range(4):
+        if extra <= max(have, 1.0) * 1e-6:
+            break
+        open_uids = [uid for uid in flexible if room[uid] > 0.0]
+        if not open_uids:
+            break
+        weight_sum = sum(weights[uid] for uid in open_uids) or 1.0
+        spent = 0.0
+        for uid in open_uids:
+            take = min(room[uid], extra * weights[uid] / weight_sum)
+            assigned[uid] += take
+            room[uid] -= take
+            spent += take
+        extra -= spent
+        if spent <= 0.0:
+            break
+
+    for uid in uids:
+        total = totals[uid]
+        target_amt = min(total, max(0.0, assigned.get(uid, 0.0)))
+        rivals = rivals_of(uid)
+        rest = total - target_amt
+        current = {
+            key: amount
+            for (u, key), amount in vol.items()
+            if u == uid and key in rivals and amount > 0.0
+        }
+        for key in {key for (u, key) in vol if u == uid}:
+            vol[(uid, key)] = 0.0
+        vol[(uid, target_key)] = target_amt
+        if rest <= 0.0 or not rivals:
+            continue
+        parts = _split_like(rivals, rest, current, rng)
+        gap = total * GRAB_HEAD_GAP_PP / 100.0
+        ceiling = target_amt - gap
+        # 这一斗的目标体积没到下限时，不再为了压对手去改整车占比。
+        if target_amt + 1e-6 < floor.get(uid, 0.0):
+            ceiling = rest
+        if ceiling < 0.0:
+            ceiling = 0.0
+        overflow = 0.0
+        for key in list(parts):
+            if parts[key] > ceiling:
+                overflow += parts[key] - ceiling
+                parts[key] = ceiling
+        for key in rivals:
+            space = ceiling - parts.get(key, 0.0)
+            if space <= 0.0 or overflow <= 0.0:
+                continue
+            give = min(space, overflow)
+            parts[key] = parts.get(key, 0.0) + give
+            overflow -= give
+        if overflow > 0.0:
+            # 对手已经都压到上限以下，多出来的只能回到目标料型。
+            vol[(uid, target_key)] = target_amt + overflow
+        for key, part in parts.items():
+            if part > 0.0:
+                vol[(uid, key)] = part
 
 
 def _emit_changes(
